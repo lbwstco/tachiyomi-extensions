@@ -4,12 +4,13 @@ plugins {
 }
 
 android {
-    compileSdkVersion(AndroidConfig.compileSdk)
+    compileSdk = AndroidConfig.compileSdk
 
     defaultConfig {
-        minSdkVersion(AndroidConfig.minSdk)
-        targetSdkVersion(AndroidConfig.targetSdk)
+        minSdk = AndroidConfig.minSdk
     }
+
+    namespace = "eu.kanade.tachiyomi.lib.dataimage"
 }
 
 repositories {

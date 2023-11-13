@@ -22,6 +22,7 @@ class MangaTR : FMReader("Manga-TR", "https://manga-tr.com", "tr") {
         add("User-Agent", "Mozilla/5.0 (Windows NT 6.3; WOW64)")
     }
     override fun popularMangaNextPageSelector() = "div.btn-group:not(div.btn-block) button.btn-info"
+
     // TODO: genre search possible but a bit of a pain
     override fun getFilterList() = FilterList()
 
@@ -47,15 +48,17 @@ class MangaTR : FMReader("Manga-TR", "https://manga-tr.com", "tr") {
 
     override fun mangaDetailsParse(document: Document): SManga {
         val manga = SManga.create()
-        val infoElement = document.select("div#tab1").first()
+        val infoElement: Element = document.select("div#tab1").first()!!
 
         manga.author = infoElement.select("table + table tr + tr td a").first()?.text()
         manga.artist = infoElement.select("table + table tr + tr td + td a").first()?.text()
         manga.genre = infoElement.select("div#tab1 table + table tr + tr td + td + td").text()
-        manga.status = parseStatus(infoElement.select("div#tab1 table tr + tr td a").first().text())
         manga.description = infoElement.select("div.well").text().trim()
         manga.thumbnail_url = document.select("img.thumbnail").attr("abs:src")
-
+        manga.status = document.select("table.table:nth-child(2) > tbody:nth-child(1) > tr:nth-child(2) td").let {
+            val translationStatus = it[it.size - 2].text()
+            parseStatus(translationStatus)
+        }
         return manga
     }
 

@@ -22,9 +22,11 @@ class Mangafreak : ParsedHttpSource() {
 
     override val lang: String = "en"
 
-    override val baseUrl: String = "https://w12.mangafreak.net"
+    override val baseUrl: String = "https://w15.mangafreak.net"
 
     override val supportsLatest: Boolean = true
+
+    private val floatLetterPattern = Regex("""(\d+)(\.\d+|[a-i]+\b)?""")
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .connectTimeout(1, TimeUnit.MINUTES)
@@ -62,7 +64,7 @@ class Mangafreak : ParsedHttpSource() {
     override fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
         thumbnail_url = element.select("img").attr("abs:src").replace("mini", "manga").substringBeforeLast("/") + ".jpg"
         element.select("a").apply {
-            title = first().text()
+            title = first()!!.text()
             url = attr("href")
         }
     }
@@ -73,7 +75,7 @@ class Mangafreak : ParsedHttpSource() {
         val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
 
         if (query.isNotBlank()) {
-            url.addPathSegments("Search/$query")
+            url.addPathSegments("Find/$query")
         }
 
         filters.forEach { filter ->
@@ -91,6 +93,7 @@ class Mangafreak : ParsedHttpSource() {
                 }
                 is StatusFilter -> url.addPathSegments("Status/${filter.toUriPart()}")
                 is TypeFilter -> url.addPathSegments("Type/${filter.toUriPart()}")
+                else -> {}
             }
         }
 
@@ -122,7 +125,31 @@ class Mangafreak : ParsedHttpSource() {
     override fun chapterListSelector(): String = "div.manga_series_list tr:has(a)"
     override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
         name = element.select("td:eq(0)").text()
-        chapter_number = name.substringAfter("Chapter ").substringBefore(" -").toFloat()
+
+        /*
+         * 123 -> 123
+         * 123.4 -> 123.4
+         * 123e -> 123.5 (a=1, b=2, ...)
+         * j-z is undefined, assume straight substitution
+         */
+        val match = floatLetterPattern.find(name)
+        chapter_number = if (match == null) {
+            -1f
+        } else {
+            if (match.groupValues[2].isEmpty() || match.groupValues[2][0] == '.') {
+                match.value.toFloat()
+            } else {
+                val sb = StringBuilder("0.")
+                for (x in match.groupValues[2]) {
+                    sb.append(x.code - 'a'.code + 1)
+                }
+                val p2 = sb.toString().toFloat()
+                val p1 = match.groupValues[1].toFloat()
+
+                p1 + p2
+            }
+        }
+
         setUrlWithoutDomain(element.select("a").attr("href"))
         date_upload = parseDate(element.select("td:eq(1)").text())
     }
@@ -136,7 +163,7 @@ class Mangafreak : ParsedHttpSource() {
     // Pages
 
     override fun pageListParse(document: Document): List<Page> = mutableListOf<Page>().apply {
-        document.select("img#gohere").forEachIndexed { index, element ->
+        document.select("img#gohere[src]").forEachIndexed { index, element ->
             add(Page(index, "", element.attr("abs:src")))
         }
     }
@@ -154,7 +181,7 @@ class Mangafreak : ParsedHttpSource() {
         Filter.Header("Filters do not work if search bar is empty"),
         GenreFilter(getGenreList()),
         TypeFilter(),
-        StatusFilter()
+        StatusFilter(),
     )
     private fun getGenreList() = listOf(
         Genre("Act"),
@@ -195,7 +222,7 @@ class Mangafreak : ParsedHttpSource() {
         Genre("Tragedy"),
         Genre("Vampire"),
         Genre("Yaoi"),
-        Genre("Yuri")
+        Genre("Yuri"),
     )
 
     private class TypeFilter : UriPartFilter(
@@ -203,8 +230,8 @@ class Mangafreak : ParsedHttpSource() {
         arrayOf(
             Pair("Both", "0"),
             Pair("Manga", "2"),
-            Pair("Manhwa", "1")
-        )
+            Pair("Manhwa", "1"),
+        ),
     )
 
     private class StatusFilter : UriPartFilter(
@@ -212,8 +239,8 @@ class Mangafreak : ParsedHttpSource() {
         arrayOf(
             Pair("Both", "0"),
             Pair("Completed", "1"),
-            Pair("Ongoing", "2")
-        )
+            Pair("Ongoing", "2"),
+        ),
     )
 
     private open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>) :

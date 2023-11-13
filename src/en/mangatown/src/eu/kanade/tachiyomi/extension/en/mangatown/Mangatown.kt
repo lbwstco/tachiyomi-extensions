@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -29,6 +30,9 @@ class Mangatown : ParsedHttpSource() {
 
     override val client: OkHttpClient = network.cloudflareClient
 
+    override fun headersBuilder(): Headers.Builder = Headers.Builder()
+        .add("Referer", baseUrl)
+
     override fun popularMangaSelector() = "li:has(a.manga_cover)"
 
     override fun popularMangaRequest(page: Int): Request {
@@ -43,7 +47,7 @@ class Mangatown : ParsedHttpSource() {
 
     override fun popularMangaFromElement(element: Element): SManga {
         return SManga.create().apply {
-            element.select("p.title a").first().let {
+            element.select("p.title a").first()!!.let {
                 setUrlWithoutDomain(it.attr("href"))
                 title = it.text()
             }

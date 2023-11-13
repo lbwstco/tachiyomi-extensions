@@ -5,10 +5,9 @@ import android.content.SharedPreferences
 import android.text.InputType
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -19,7 +18,6 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -31,7 +29,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import rx.Observable
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
@@ -51,11 +48,11 @@ class ArgosScan : HttpSource(), ConfigurableSource {
 
     override val lang = "pt-BR"
 
-    override val supportsLatest = true
+    override val supportsLatest = false
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::loginIntercept)
-        .addInterceptor(RateLimitInterceptor(1, 2, TimeUnit.SECONDS))
+        .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
 
     private val json: Json by injectLazy()
@@ -72,7 +69,11 @@ class ArgosScan : HttpSource(), ConfigurableSource {
     private fun genericMangaFromObject(project: ArgosProjectDto): SManga = SManga.create().apply {
         title = project.name!!
         url = "/obras/${project.id}"
-        thumbnail_url = "$baseUrl/images/${project.id}/${project.cover!!}"
+        thumbnail_url = if (project.cover!! == "default.jpg") {
+            "$baseUrl/img/default.jpg"
+        } else {
+            "$baseUrl/images/${project.id}/${project.cover}"
+        }
     }
 
     override fun popularMangaRequest(page: Int): Request {
@@ -105,20 +106,9 @@ class ArgosScan : HttpSource(), ConfigurableSource {
         return MangasPage(mangaList, hasNextPage)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val payload = buildLatestQueryPayload(page)
+    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
 
-        val body = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
-
-        val newHeaders = headersBuilder()
-            .add("Content-Length", body.contentLength().toString())
-            .add("Content-Type", body.contentType().toString())
-            .build()
-
-        return POST(GRAPHQL_URL, newHeaders, body)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
+    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val payload = buildSearchQueryPayload(query, page)
@@ -135,16 +125,9 @@ class ArgosScan : HttpSource(), ConfigurableSource {
 
     override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
 
-    // Workaround to allow "Open in browser" use the real URL.
-    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
-        return client.newCall(mangaDetailsApiRequest(manga))
-            .asObservableSuccess()
-            .map { response ->
-                mangaDetailsParse(response).apply { initialized = true }
-            }
-    }
+    override fun getMangaUrl(manga: SManga): String = baseUrl + manga.url
 
-    private fun mangaDetailsApiRequest(manga: SManga): Request {
+    override fun mangaDetailsRequest(manga: SManga): Request {
         val mangaId = manga.url.substringAfter("obras/").toInt()
 
         val payload = buildMangaDetailsQueryPayload(mangaId)
@@ -169,14 +152,18 @@ class ArgosScan : HttpSource(), ConfigurableSource {
         val project = result.data["project"]!!
 
         title = project.name!!
-        thumbnail_url = "$baseUrl/images/${project.id}/${project.cover!!}"
+        thumbnail_url = if (project.cover!! == "default.jpg") {
+            "$baseUrl/img/default.jpg"
+        } else {
+            "$baseUrl/images/${project.id}/${project.cover}"
+        }
         description = project.description.orEmpty()
         author = project.authors.orEmpty().joinToString()
         status = SManga.ONGOING
         genre = project.tags.orEmpty().sortedBy(ArgosTagDto::name).joinToString { it.name }
     }
 
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsApiRequest(manga)
+    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val result = response.parseAs<ArgosResponseDto<ArgosProjectDto>>()
@@ -196,7 +183,13 @@ class ArgosScan : HttpSource(), ConfigurableSource {
         url = "/leitor/${chapter.id}"
     }
 
+    override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
+
     override fun pageListRequest(chapter: SChapter): Request {
+        if (chapter.url.removePrefix("/leitor/").toIntOrNull() != null) {
+            throw Exception(REFRESH_WARNING)
+        }
+
         val chapterId = chapter.url.substringAfter("leitor/")
 
         val payload = buildPagesQueryPayload(chapterId)
@@ -302,7 +295,7 @@ class ArgosScan : HttpSource(), ConfigurableSource {
                 throw IOException(CLOUDFLARE_ERROR)
             }
 
-            val loginResult = json.parseToJsonElement(loginResponse.body!!.string()).jsonObject
+            val loginResult = json.parseToJsonElement(loginResponse.body.string()).jsonObject
 
             if (loginResult["errors"] != null) {
                 loginResponse.close()
@@ -347,7 +340,7 @@ class ArgosScan : HttpSource(), ConfigurableSource {
     }
 
     private inline fun <reified T> Response.parseAs(): T = use {
-        json.decodeFromString(it.body?.string().orEmpty())
+        json.decodeFromString(it.body.string())
     }
 
     private fun String.toDate(): Long {
@@ -370,6 +363,7 @@ class ArgosScan : HttpSource(), ConfigurableSource {
 
         private const val CLOUDFLARE_ERROR = "Falha ao contornar o Cloudflare."
         private const val REQUEST_ERROR = "Erro na requisição. Tente novamente mais tarde."
+        private const val REFRESH_WARNING = "Atualize a lista de capítulos para atualizar os IDs."
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaTypeOrNull()
 

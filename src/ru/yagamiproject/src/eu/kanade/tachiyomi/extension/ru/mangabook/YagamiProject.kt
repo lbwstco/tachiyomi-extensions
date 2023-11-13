@@ -35,10 +35,10 @@ class YagamiProject : ParsedHttpSource() {
     override fun popularMangaSelector() = ".list .group"
     override fun popularMangaFromElement(element: Element): SManga {
         return SManga.create().apply {
-            element.select(".title a").first().let {
+            element.select(".title a").first()!!.let {
                 setUrlWithoutDomain(it.attr("href"))
                 val baseTitle = it.attr("title")
-                title = if (baseTitle.isNullOrEmpty()) { it.text() } else baseTitle.split(" / ").sorted().first()
+                title = if (baseTitle.isNullOrEmpty()) { it.text() } else baseTitle.split(" / ").min()
             }
             thumbnail_url = element.select(".cover_mini > img").attr("src").replace("thumb_", "")
         }
@@ -52,30 +52,29 @@ class YagamiProject : ParsedHttpSource() {
 
     // Search
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = if (query.isNotBlank()) {
-            "$baseUrl/reader/search/?s=$query&p=$page"
-        } else {
-            (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
-                when (filter) {
-                    is CategoryList -> {
-                        if (filter.state > 0) {
-                            val CatQ = getCategoryList()[filter.state].name
-                            val catUrl = "$baseUrl/tags/$CatQ".toHttpUrlOrNull()!!.newBuilder()
-                            return GET(catUrl.toString(), headers)
-                        }
-                    }
-                    is FormatList -> {
-                        if (filter.state > 0) {
-                            val FormN = getFormatList()[filter.state].query
-                            val formaUrl = "$baseUrl/$FormN".toHttpUrlOrNull()!!.newBuilder()
-                            return GET(formaUrl.toString(), headers)
-                        }
+        if (query.isNotBlank()) {
+            return GET("$baseUrl/reader/search/?s=$query&p=$page", headers)
+        }
+        (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
+            when (filter) {
+                is CategoryList -> {
+                    if (filter.state > 0) {
+                        val catQ = getCategoryList()[filter.state].name
+                        val catUrl = "$baseUrl/tags/$catQ".toHttpUrlOrNull()!!.newBuilder()
+                        return GET(catUrl.toString(), headers)
                     }
                 }
+                is FormatList -> {
+                    if (filter.state > 0) {
+                        val formN = getFormatList()[filter.state].query
+                        val formaUrl = "$baseUrl/$formN".toHttpUrlOrNull()!!.newBuilder()
+                        return GET(formaUrl.toString(), headers)
+                    }
+                }
+                else -> {}
             }
-            throw Exception("Filters Not")
         }
-        return GET(url, headers)
+        return popularMangaRequest(page)
     }
 
     override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
@@ -87,26 +86,27 @@ class YagamiProject : ParsedHttpSource() {
 
     // Details
     override fun mangaDetailsParse(document: Document): SManga {
-        val infoElement = document.select(".large.comic .info").first()
+        val infoElement = document.select(".large.comic .info").first()!!
         val manga = SManga.create()
         val titlestr = document.select("title").text().substringBefore(" :: Yagami").split(" :: ").sorted()
         manga.title = titlestr.first().replace(":: ", "")
-        manga.thumbnail_url = document.select(".cover img").first().attr("src")
-        manga.author = infoElement.select("li:contains(Автор(ы):)")?.first()?.text()?.substringAfter("Автор(ы): ")?.split(" / ")?.sorted()?.first()
-        manga.artist = infoElement.select("li:contains(Художник(и):)")?.first()?.text()?.substringAfter("Художник(и): ")?.split(" / ")?.sorted()?.first()
-        manga.status = when (infoElement.select("li:contains(Статус перевода:) span")?.first()?.text()) {
+        manga.thumbnail_url = document.select(".cover img").first()!!.attr("src")
+        manga.author = infoElement.select("li:contains(Автор(ы):)").first()?.text()?.substringAfter("Автор(ы): ")?.split(" / ")?.min()?.replace("N/A", "")?.trim()
+        manga.artist = infoElement.select("li:contains(Художник(и):)").first()?.text()?.substringAfter("Художник(и): ")?.split(" / ")?.min()?.replace("N/A", "")?.trim()
+        manga.status = when (infoElement.select("li:contains(Статус перевода:) span").first()?.text()) {
             "онгоинг" -> SManga.ONGOING
             "активный" -> SManga.ONGOING
             "завершён" -> SManga.COMPLETED
             else -> SManga.UNKNOWN
         }
-        manga.genre = infoElement.select("li:contains(Жанры:)")?.first()?.text()?.substringAfter("Жанры: ")
+        manga.genre = infoElement.select("li:contains(Жанры:)").first()?.text()?.substringAfter("Жанры: ")
         val altSelector = infoElement.select("li:contains(Название:)")
         var altName = ""
         if (altSelector.isNotEmpty()) {
             altName = "Альтернативные названия:\n" + altSelector.first().toString().replace("<li><b>Название</b>: ", "").replace("<br>", " / ").substringAfter(" / ").substringBefore("</li>") + "\n\n"
         }
-        manga.description = titlestr.last().replace(":: ", "") + "\n" + altName + infoElement.select("li:contains(Описание:)")?.first()?.text()?.substringAfter("Описание: ")
+        val descriptElem = infoElement.select("li:contains(Описание:)").first()?.text()?.substringAfter("Описание: ") ?: ""
+        manga.description = titlestr.last().replace(":: ", "") + "\n" + altName + descriptElem
         return manga
     }
 
@@ -114,21 +114,23 @@ class YagamiProject : ParsedHttpSource() {
     override fun chapterListSelector(): String = ".list .element"
     override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
         val chapter = element.select(".title a")
-        val chapterScan_Date = element.select(".meta_r")
-        name = when {
-            chapter.attr("title").isNullOrBlank() -> chapter.text()
-            else -> chapter.attr("title")
+        val chapterScanDate = element.select(".meta_r")
+
+        name = if (chapter.attr("title").isNullOrBlank()) {
+            chapter.text()
+        } else {
+            chapter.attr("title")
         }
-        val numout = name.substringBefore(":").substringAfterLast(" ").substringAfterLast("№")
-        chapter_number = when {
-            numout.contains(Regex("^[0-9]+")) -> numout.toFloat()
-            else -> 0F
-        }
+
+        chapter_number = name.substringBefore(":").substringAfterLast(" ").substringAfterLast("№").substringAfterLast("#").toFloatOrNull() ?: chapter.attr("href").substringBeforeLast("/").substringAfterLast("/").toFloatOrNull() ?: -1f
+
         setUrlWithoutDomain(chapter.attr("href"))
-        date_upload = parseDate(chapterScan_Date.text().substringAfter(", "))
-        scanlator = if (chapterScan_Date.select("a").isNotEmpty()) {
-            chapterScan_Date.select("a").map { it.text() }.joinToString(" / ")
-        } else null
+        date_upload = parseDate(chapterScanDate.text().substringAfter(", "))
+        scanlator = if (chapterScanDate.select("a").isNotEmpty()) {
+            chapterScanDate.select("a").joinToString(" / ") { it.text() }
+        } else {
+            null
+        }
     }
     private fun parseDate(date: String): Long {
         return when (date) {
@@ -137,6 +139,7 @@ class YagamiProject : ParsedHttpSource() {
             else -> SimpleDateFormat("dd.MM.yyyy", Locale.US).parse(date)?.time ?: 0
         }
     }
+
     // Pages
     override fun pageListParse(document: Document): List<Page> = mutableListOf<Page>().apply {
         val defaultsel = document.select(".dropdown li a")
@@ -155,7 +158,7 @@ class YagamiProject : ParsedHttpSource() {
     override fun imageUrlParse(document: Document): String {
         val defaultimg = document.select("#page img").attr("src")
         return if (defaultimg.contains("string(1)")) {
-            document.select("#get_download").first().attr("href")
+            document.select("#get_download").first()!!.attr("href")
         } else {
             defaultimg
         }
@@ -165,7 +168,7 @@ class YagamiProject : ParsedHttpSource() {
     override fun getFilterList() = FilterList(
         Filter.Header("ПРИМЕЧАНИЕ: Фильтры исключают другдруга!"),
         CategoryList(categoriesName),
-        FormatList(formasName)
+        FormatList(formasName),
     )
 
     private class FormatList(formas: Array<String>) : Filter.Select<String>("Тип", formas)
@@ -180,7 +183,7 @@ class YagamiProject : ParsedHttpSource() {
         FormUnit("Манхва", "manhva"),
         FormUnit("Веб Манхва", "webtoon"),
         FormUnit("Маньхуа", "manhua"),
-        FormUnit("Артбуки", "artbooks")
+        FormUnit("Артбуки", "artbooks"),
 
     )
 
@@ -221,6 +224,6 @@ class YagamiProject : ParsedHttpSource() {
         CatUnit("школьная жизнь"),
         CatUnit("экшн"),
         CatUnit("эротика"),
-        CatUnit("этти")
+        CatUnit("этти"),
     )
 }

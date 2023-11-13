@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="eu.kanade.tachiyomi.extension">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application>
         <activity
@@ -16,6 +15,10 @@
 
                 <data
                     android:host="mangabz.com"
+                    android:pathPattern="/..*"
+                    android:scheme="https" />
+                <data
+                    android:host="xmanhua.com"
                     android:pathPattern="/..*"
                     android:scheme="https" />
             </intent-filter>

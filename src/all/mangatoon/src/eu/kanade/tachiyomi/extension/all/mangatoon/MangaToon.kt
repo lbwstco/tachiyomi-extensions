@@ -1,7 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.mangatoon
 
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
@@ -13,13 +13,14 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.select.Elements
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 open class MangaToon(
     final override val lang: String,
-    private val urlLang: String = lang
+    private val urlLang: String = lang,
 ) : ParsedHttpSource() {
 
     override val name = "MangaToon (Limited)"
@@ -34,7 +35,7 @@ open class MangaToon(
     override val supportsLatest = true
 
     override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(RateLimitInterceptor(1, 1, TimeUnit.SECONDS))
+        .rateLimit(1, 1, TimeUnit.SECONDS)
         .build()
 
     private val locale by lazy { Locale.forLanguageTag(lang) }
@@ -59,8 +60,8 @@ open class MangaToon(
 
     override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
         title = element.select("div.content-title").text().trim()
-        thumbnail_url = element.select("img").attr("abs:src").toNormalPosterUrl()
-        url = element.selectFirst("a").attr("href")
+        thumbnail_url = element.select("img").imgAttr().toNormalPosterUrl()
+        setUrlWithoutDomain(element.selectFirst("a")!!.attr("href"))
     }
 
     override fun popularMangaNextPageSelector() = "span.next"
@@ -83,12 +84,12 @@ open class MangaToon(
         return GET(searchUrl, headers)
     }
 
-    override fun searchMangaSelector() = "div.comics-result div.recommend-item"
+    override fun searchMangaSelector() = "div.comics-result div.recommend-item:has(a[abs:href^=$baseUrl])"
 
     override fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
         title = element.select("div.recommend-comics-title").text().trim()
-        thumbnail_url = element.select("img").attr("abs:src").toNormalPosterUrl()
-        url = element.selectFirst("a").attr("href")
+        thumbnail_url = element.select("img").imgAttr().toNormalPosterUrl()
+        setUrlWithoutDomain(element.selectFirst("a")!!.attr("href"))
     }
 
     override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
@@ -104,8 +105,10 @@ open class MangaToon(
             .sorted()
             .joinToString { it.trim() }
         status = document.select("div.detail-status").text().trim().toStatus()
-        thumbnail_url = document.select("div.detail-img img.ori-image").attr("abs:src")
-            .toNormalPosterUrl()
+        val thumbnail = document.select("div.detail-img img").imgAttr().toNormalPosterUrl()
+        if (!thumbnail.contains("cartoon-big-images")) {
+            thumbnail_url = thumbnail
+        }
     }
 
     override fun chapterListRequest(manga: SManga): Request {
@@ -142,12 +145,12 @@ open class MangaToon(
         chapter_number = element.select("div.episode-number").text().trim()
             .toFloatOrNull() ?: -1f
         date_upload = element.select("div.episode-date span.open-date").text().toDate()
-        url = element.attr("href")
+        setUrlWithoutDomain(element.attr("href"))
     }
 
     override fun pageListParse(document: Document): List<Page> {
         return document.select("div.pictures div img:first-child")
-            .mapIndexed { i, element -> Page(i, "", element.attr("abs:src")) }
+            .mapIndexed { i, element -> Page(i, "", element.imgAttr()) }
             .takeIf { it.isNotEmpty() } ?: throw Exception(lockedError)
     }
 
@@ -158,9 +161,16 @@ open class MangaToon(
             .getOrNull() ?: 0L
     }
 
+    protected open fun Element.imgAttr(): String = when {
+        hasAttr("data-src") -> attr("abs:data-src")
+        else -> attr("abs:src")
+    }
+
+    protected open fun Elements.imgAttr(): String = this.first()!!.imgAttr()
+
     private fun String.toNormalPosterUrl(): String = replace(POSTER_SUFFIX, "$1")
 
-    private fun String.toStatus(): Int = when (toLowerCase(locale)) {
+    private fun String.toStatus(): Int = when (lowercase(locale)) {
         in ONGOING_STATUS -> SManga.ONGOING
         in COMPLETED_STATUS -> SManga.COMPLETED
         else -> SManga.UNKNOWN
@@ -169,11 +179,18 @@ open class MangaToon(
     companion object {
         private val ONGOING_STATUS = listOf(
             "连载", "on going", "sedang berlangsung", "tiếp tục cập nhật",
-            "en proceso", "atualizando", "เซเรียล", "en cours", "連載中"
+            "en proceso", "atualizando", "เซเรียล", "en cours", "連載中",
         )
 
         private val COMPLETED_STATUS = listOf(
-            "完结", "completed", "tamat", "đã full", "terminada", "concluído", "จบ", "fin"
+            "完结",
+            "completed",
+            "tamat",
+            "đã full",
+            "terminada",
+            "concluído",
+            "จบ",
+            "fin",
         )
 
         private val DATE_FORMAT by lazy {

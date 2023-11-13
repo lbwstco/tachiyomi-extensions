@@ -5,20 +5,13 @@ import eu.kanade.tachiyomi.source.SourceFactory
 
 class MangaPlusFactory : SourceFactory {
     override fun createSources(): List<Source> = listOf(
-        MangaPlusEnglish(),
-        MangaPlusIndonesian(),
-        MangaPlusPortuguese(),
-        MangaPlusRussian(),
-        MangaPlusSpanish(),
-        MangaPlusThai(),
-        MangaPlusFrench()
+        MangaPlus("en", "eng", Language.ENGLISH),
+        MangaPlus("es", "esp", Language.SPANISH),
+        MangaPlus("fr", "fra", Language.FRENCH),
+        MangaPlus("id", "ind", Language.INDONESIAN),
+        MangaPlus("pt-BR", "ptb", Language.PORTUGUESE_BR),
+        MangaPlus("ru", "rus", Language.RUSSIAN),
+        MangaPlus("th", "tha", Language.THAI),
+        MangaPlus("vi", "vie", Language.VIETNAMESE),
     )
 }
-
-class MangaPlusEnglish : MangaPlus("en", "eng", Language.ENGLISH)
-class MangaPlusIndonesian : MangaPlus("id", "ind", Language.INDONESIAN)
-class MangaPlusPortuguese : MangaPlus("pt-BR", "ptb", Language.PORTUGUESE_BR)
-class MangaPlusRussian : MangaPlus("ru", "rus", Language.RUSSIAN)
-class MangaPlusSpanish : MangaPlus("es", "esp", Language.SPANISH)
-class MangaPlusThai : MangaPlus("th", "tha", Language.THAI)
-class MangaPlusFrench : MangaPlus("fr", "fra", Language.FRENCH)

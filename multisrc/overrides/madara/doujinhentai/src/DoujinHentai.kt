@@ -11,7 +11,15 @@ import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class DoujinHentai : Madara("DoujinHentai", "https://doujinhentai.net", "es", SimpleDateFormat("d MMM. yyyy", Locale.ENGLISH)) {
+class DoujinHentai : Madara(
+    "DoujinHentai",
+    "https://doujinhentai.net",
+    "es",
+    SimpleDateFormat("d MMM. yyyy", Locale.ENGLISH),
+) {
+
+    override val fetchGenres = false
+
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/lista-manga-hentai?orderby=views&page=$page", headers)
     override fun popularMangaSelector() = "div.col-md-3 a"
     override fun popularMangaFromElement(element: Element): SManga {
@@ -40,6 +48,7 @@ class DoujinHentai : Madara("DoujinHentai", "https://doujinhentai.net", "es", Si
                             url.addQueryParameter("page", page.toString())
                         }
                     }
+                    else -> {}
                 }
             }
         }
@@ -61,7 +70,7 @@ class DoujinHentai : Madara("DoujinHentai", "https://doujinhentai.net", "es", Si
 
     override fun getFilterList() = FilterList(
         Filter.Header("Solo funciona si la consulta está en blanco"),
-        GenreSelectFilter()
+        GenreSelectFilter(),
     )
 
     class GenreSelectFilter : UriPartFilter(
@@ -99,7 +108,7 @@ class DoujinHentai : Madara("DoujinHentai", "https://doujinhentai.net", "es", Si
             Pair("Sin Censura", "sin-censura"),
             Pair("Futanari", "futanari"),
             Pair("Doble Penetracion", "doble-penetracion"),
-            Pair("Cosplay", "cosplay")
-        )
+            Pair("Cosplay", "cosplay"),
+        ),
     )
 }

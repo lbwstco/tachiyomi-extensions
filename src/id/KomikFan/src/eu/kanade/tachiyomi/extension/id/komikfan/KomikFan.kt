@@ -91,8 +91,8 @@ class KomikFan : ParsedHttpSource() {
     }
 
     private fun parseStatus(element: String): Int = when {
-        element.toLowerCase().contains("ongoing") -> SManga.ONGOING
-        element.toLowerCase().contains("completed") -> SManga.COMPLETED
+        element.lowercase().contains("ongoing") -> SManga.ONGOING
+        element.lowercase().contains("completed") -> SManga.COMPLETED
         else -> SManga.UNKNOWN
     }
 
@@ -100,7 +100,7 @@ class KomikFan : ParsedHttpSource() {
     override fun chapterListSelector() = "#Chapter > table tr:has(a)"
 
     override fun chapterFromElement(element: Element): SChapter {
-        val urlElement = element.select("td.judulseries a").first()
+        val urlElement = element.select("td.judulseries a").first()!!
         val chapter = SChapter.create()
         val mangaTitle = element.select("td.judulseries a span").text()
         chapter.setUrlWithoutDomain(urlElement.attr("href"))
@@ -109,7 +109,7 @@ class KomikFan : ParsedHttpSource() {
         return chapter
     }
 
-    fun parseChapterDate(date: String): Long {
+    private fun parseChapterDate(date: String): Long {
         return if (date.contains("yang lalu")) {
             val value = date.split(' ')[0].toInt()
             when {

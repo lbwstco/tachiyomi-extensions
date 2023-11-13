@@ -1,14 +1,14 @@
 package eu.kanade.tachiyomi.extension.pt.brmangas
 
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -20,14 +20,14 @@ class BrMangas : ParsedHttpSource() {
 
     override val name = "BR Mangás"
 
-    override val baseUrl = "https://brmangas.com"
+    override val baseUrl = "https://www.brmangas.net"
 
     override val lang = "pt-BR"
 
     override val supportsLatest = true
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .addInterceptor(RateLimitInterceptor(1, 2, TimeUnit.SECONDS))
+        .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
@@ -38,14 +38,15 @@ class BrMangas : ParsedHttpSource() {
     override fun popularMangaRequest(page: Int): Request {
         val listPath = if (page == 1) "" else "page/${page - 1}"
         val newHeaders = headersBuilder()
-            .set("Referer", "$baseUrl/lista-de-mangas/$listPath")
+            .set("Referer", "$baseUrl/$listPath")
             .build()
 
         val pageStr = if (page != 1) "page/$page" else ""
-        return GET("$baseUrl/lista-de-mangas/$pageStr", newHeaders)
+        return GET("$baseUrl/$pageStr", newHeaders)
     }
 
-    override fun popularMangaSelector(): String = "div.listagem.row div.item a[title]"
+    override fun popularMangaSelector(): String =
+        "span.heading:contains(Todos os Mangás) ~ div.listagem.row div.item a[title]"
 
     override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
         val thumbnailEl = element.select("img").first()!!
@@ -77,13 +78,14 @@ class BrMangas : ParsedHttpSource() {
     override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = baseUrl.toHttpUrlOrNull()!!.newBuilder()
+        val url = baseUrl.toHttpUrl().newBuilder()
             .addQueryParameter("s", query)
+            .build()
 
-        return GET(url.toString(), headers)
+        return GET(url, headers)
     }
 
-    override fun searchMangaSelector() = popularMangaSelector()
+    override fun searchMangaSelector() = "div.listagem.row div.item a[title]"
 
     override fun searchMangaFromElement(element: Element): SManga = popularMangaFromElement(element)
 
@@ -92,7 +94,7 @@ class BrMangas : ParsedHttpSource() {
     override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
         val infoElement = document.select("div.serie-geral div.infoall").first()!!
 
-        title = document.select("title").first().text().substringBeforeLast(" - ")
+        title = document.select("title").first()!!.text().substringBeforeLast(" - ")
         author = infoElement.select("div.serie-infos li:contains(Autor)").firstOrNull()?.ownText()
         genre = infoElement.select("a.category.tag").joinToString { it.text() }
         description = document.select("div.manga_sinopse ~ p").text().trim()

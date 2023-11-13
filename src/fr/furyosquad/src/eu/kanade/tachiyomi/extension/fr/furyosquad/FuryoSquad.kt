@@ -1,8 +1,8 @@
 package eu.kanade.tachiyomi.extension.fr.furyosquad
 
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -25,18 +25,16 @@ class FuryoSquad : ParsedHttpSource() {
 
     override val name = "FuryoSquad"
 
-    override val baseUrl = "https://www.furyosquad.com/"
+    override val baseUrl = "https://www.furyosociety.com/"
 
     override val lang = "fr"
 
     override val supportsLatest = true
 
-    private val rateLimitInterceptor = RateLimitInterceptor(1)
-
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .addNetworkInterceptor(rateLimitInterceptor)
+        .rateLimit(1)
         .build()
 
     // Popular
@@ -123,10 +121,10 @@ class FuryoSquad : ParsedHttpSource() {
 
         document.select("div.comic-info").let {
             it.select("p.fs-comic-label").forEach { el ->
-                when (el.text().toLowerCase(Locale.ROOT)) {
-                    "scénario" -> manga.author = el.nextElementSibling().text()
-                    "dessins" -> manga.artist = el.nextElementSibling().text()
-                    "genre" -> manga.genre = el.nextElementSibling().text()
+                when (el.text().lowercase(Locale.ROOT)) {
+                    "scénario" -> manga.author = el.nextElementSibling()!!.text()
+                    "dessins" -> manga.artist = el.nextElementSibling()!!.text()
+                    "genre" -> manga.genre = el.nextElementSibling()!!.text()
                 }
             }
             manga.description = it.select("div.fs-comic-description").text()
@@ -151,9 +149,10 @@ class FuryoSquad : ParsedHttpSource() {
     }
 
     private fun parseChapterDate(date: String): Long {
-        val lcDate = date.toLowerCase(Locale.ROOT)
-        if (lcDate.startsWith("il y a"))
+        val lcDate = date.lowercase(Locale.ROOT)
+        if (lcDate.startsWith("il y a")) {
             parseRelativeDate(lcDate).let { return it }
+        }
 
         // Handle 'day before yesterday', yesterday' and 'today', using midnight
         var relativeDate: Calendar? = null
@@ -188,7 +187,6 @@ class FuryoSquad : ParsedHttpSource() {
     }
 
     private fun parseRelativeDate(date: String): Long {
-
         val value = date.split(" ")[3].toIntOrNull()
 
         return if (value != null) {

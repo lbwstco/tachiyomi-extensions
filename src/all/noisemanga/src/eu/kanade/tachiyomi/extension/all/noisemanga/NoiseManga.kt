@@ -1,7 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.noisemanga
 
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -26,7 +26,7 @@ abstract class NoiseManga(override val lang: String) : ParsedHttpSource() {
     override val supportsLatest = false
 
     override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(RateLimitInterceptor(1, 2, TimeUnit.SECONDS))
+        .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
@@ -68,8 +68,8 @@ abstract class NoiseManga(override val lang: String) : ParsedHttpSource() {
     override fun mangaDetailsRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
 
     override fun mangaDetailsParse(document: Document): SManga {
-        val mainContent = document.select("div.main-content-page").first()
-        val entryContent = mainContent.select("div.entry-content").first()
+        val mainContent = document.select("div.main-content-page").first()!!
+        val entryContent = mainContent.select("div.entry-content").first()!!
         val descriptionSelector = if (lang == "en") "h4 + h4, h4 + div h4" else "h1 + h4"
         val mangaSlug = document.location().replace(baseUrl, "")
 
@@ -146,7 +146,7 @@ abstract class NoiseManga(override val lang: String) : ParsedHttpSource() {
                 artist = "Max Andrade"
                 author = "Max Andrade"
                 thumbnail_url = "/wp-content/uploads/2019/11/TC_001_NOISE_0000-1.jpg"
-            }
+            },
         )
     }
 }

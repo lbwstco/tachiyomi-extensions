@@ -3,7 +3,7 @@ package eu.kanade.tachiyomi.extension.ko.toonkor
 import android.app.Application
 import android.content.SharedPreferences
 import android.util.Base64
-import eu.kanade.tachiyomi.BuildConfig
+import eu.kanade.tachiyomi.AppInfo
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
@@ -28,7 +28,7 @@ class Toonkor : ConfigurableSource, ParsedHttpSource() {
 
     private val defaultBaseUrl = "https://tkor.dog"
 
-    private val BASE_URL_PREF = "overrideBaseUrl_v${BuildConfig.VERSION_NAME}"
+    private val BASE_URL_PREF = "overrideBaseUrl_v${AppInfo.getVersionName()}"
 
     override val baseUrl by lazy { getPrefBaseUrl() }
 
@@ -157,7 +157,7 @@ class Toonkor : ConfigurableSource, ParsedHttpSource() {
             Filter.Header("Note: can't combine with text search!"),
             Filter.Separator(),
             TypeFilter(getTypeList()),
-            SortFilter(getSortList())
+            SortFilter(getSortList()),
         )
     }
 
@@ -167,13 +167,13 @@ class Toonkor : ConfigurableSource, ParsedHttpSource() {
     private fun getTypeList() = arrayOf(
         Pair("Webtoons", webtoonsRequestPath),
         Pair("Manga", "/%EB%8B%A8%ED%96%89%EB%B3%B8"),
-        Pair("Hentai", "/%EB%A7%9D%EA%B0%80")
+        Pair("Hentai", "/%EB%A7%9D%EA%B0%80"),
     )
 
     private fun getSortList() = arrayOf(
         Pair("Popular", ""),
         Pair("Latest", latestRequestModifier),
-        Pair("Completed", "/%EC%99%84%EA%B2%B0")
+        Pair("Completed", "/%EC%99%84%EA%B2%B0"),
     )
 
     open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>) :

@@ -1,8 +1,8 @@
 package eu.kanade.tachiyomi.extension.all.mangapark
 
-import com.squareup.duktape.Duktape
+import eu.kanade.tachiyomi.lib.cryptoaes.CryptoAES
+import eu.kanade.tachiyomi.lib.cryptoaes.Deobfuscator
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -12,18 +12,12 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
@@ -34,19 +28,18 @@ import java.util.concurrent.TimeUnit
 
 open class MangaPark(
     final override val lang: String,
-    private val siteLang: String
+    private val siteLang: String,
 ) : ParsedHttpSource() {
 
     override val name: String = "MangaPark v3"
 
-    override val baseUrl: String = "https://v35.mangapark.net" // temporary url change to keep the ext working after update return to https://mangapark.net or https://v36.mangapark.net at later date
+    override val baseUrl: String = "https://mangapark.net"
 
     override val supportsLatest = true
 
     override val id: Long = when (lang) {
         "zh-Hans" -> 6306867705763005424
         "zh-Hant" -> 4563855043528673539
-        "ro-MD" -> 7298853649198357919
         else -> super.id
     }
 
@@ -193,53 +186,34 @@ open class MangaPark(
 
     private fun String?.parseStatus() = if (this == null) {
         SManga.UNKNOWN
-    } else when {
-        this.toLowerCase(Locale.US).contains("ongoing") -> SManga.ONGOING
-        this.toLowerCase(Locale.US).contains("hiatus") -> SManga.ONGOING
-        this.toLowerCase(Locale.US).contains("completed") -> SManga.COMPLETED
-        else -> SManga.UNKNOWN
-    }
-
-    override fun chapterListRequest(manga: SManga): Request {
-        val sid = "$baseUrl${manga.url}".toHttpUrl().pathSegments[1].toInt()
-
-        val jsonPayload = buildJsonObject {
-            put("lang", siteLang)
-            put("sid", sid)
+    } else {
+        when {
+            this.lowercase(Locale.US).contains("ongoing") -> SManga.ONGOING
+            this.lowercase(Locale.US).contains("hiatus") -> SManga.ONGOING
+            this.lowercase(Locale.US).contains("completed") -> SManga.COMPLETED
+            else -> SManga.UNKNOWN
         }
-
-        val requestBody =
-            jsonPayload.toString().toRequestBody("application/json;charset=UTF-8".toMediaType())
-
-        val refererUrl = "$baseUrl/${manga.url}".toHttpUrl().newBuilder()
-            .toString()
-        val newHeaders = headersBuilder()
-            .add("Content-Length", requestBody.contentLength().toString())
-            .add("Content-Type", requestBody.contentType().toString())
-            .set("Referer", refererUrl)
-            .build()
-
-        return POST(
-            "$baseUrl/ajax.reader.subject.episodes.by.serial",
-            headers = newHeaders,
-            body = requestBody
-        )
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val resToJson = json.parseToJsonElement(response.body!!.string()).jsonObject
-        val document = Jsoup.parse(resToJson["html"]!!.jsonPrimitive.content)
-        return document.select(chapterListSelector()).map { chapterFromElement(it) }
+        val chapterListHtml = response.asJsoup().select("div.episode-list #chap-index")
+        return chapterListHtml.flatMap { it.select(chapterListSelector()).map { chapElem -> chapterFromElement(chapElem) } }
     }
 
-    override fun chapterListSelector() = "div.episode-item"
+    override fun chapterListSelector(): String {
+        return when (lang) {
+            "en" -> "div.p-2:not(:has(.px-3))"
+            // To handle both "/comic/1/test/c0-en" and "/comic/1/test/c0-en/" like url
+            else -> "div.p-2:has(.px-3 a[href\$=\"$siteLang\"]), div.p-2:has(.px-3 a[href\$=\"$siteLang/\"])"
+        }
+    }
 
     override fun chapterFromElement(element: Element): SChapter {
-        val urlElement = element.select("a.chapt")
+        val urlElement = element.select("a.ms-3")
 
         return SChapter.create().apply {
-            name = urlElement.text()
-            date_upload = element.select("div.extra > i.ps-2").text().parseChapterDate()
+            name = urlElement.text().removePrefix("Ch").trim()
+            date_upload = element.select("i.text-nowrap").text().parseChapterDate()
             setUrlWithoutDomain(urlElement.attr("href").removeSuffix("/"))
         }
     }
@@ -281,29 +255,21 @@ open class MangaPark(
             throw Exception("The chapter content seems to be deleted.\n\nContact the site owner if possible.")
         }
 
-        val script = document.select("script").html()
-        val imgCdnHost = script.substringAfter("const imgCdnHost = \"").substringBefore("\";")
-        val imgPathLisRaw = script.substringAfter("const imgPathLis = ").substringBefore(";")
-        val imgPathLis = json.parseToJsonElement(imgPathLisRaw).jsonArray
-        val amPass = script.substringAfter("const amPass = ").substringBefore(";")
-        val amWord = script.substringAfter("const amWord = ").substringBefore(";")
+        val script = document.selectFirst("script:containsData(imgHttpLis):containsData(amWord):containsData(amPass)")?.html()
+            ?: throw RuntimeException("Couldn't find script with image data.")
 
-        val decryptScript =
-            cryptoJS + "CryptoJS.AES.decrypt($amWord, $amPass).toString(CryptoJS.enc.Utf8);"
+        val imgHttpLisString = script.substringAfter("const imgHttpLis =").substringBefore(";").trim()
+        val imgHttpLis = json.parseToJsonElement(imgHttpLisString).jsonArray.map { it.jsonPrimitive.content }
+        val amWord = script.substringAfter("const amWord =").substringBefore(";").trim()
+        val amPass = script.substringAfter("const amPass =").substringBefore(";").trim()
 
-        val imgWordLisRaw = Duktape.create().use { it.evaluate(decryptScript).toString() }
-        val imgWordLis = json.parseToJsonElement(imgWordLisRaw).jsonArray
+        val evaluatedPass: String = Deobfuscator.deobfuscateJsPassword(amPass)
+        val imgAccListString = CryptoAES.decrypt(amWord.removeSurrounding("\""), evaluatedPass)
+        val imgAccList = json.parseToJsonElement(imgAccListString).jsonArray.map { it.jsonPrimitive.content }
 
-        return imgWordLis.mapIndexed { i, imgWordE ->
-            val imgPath = imgPathLis[i].jsonPrimitive.content
-            val imgWord = imgWordE.jsonPrimitive.content
-
-            Page(i, "", "$imgCdnHost$imgPath?$imgWord")
+        return imgHttpLis.zip(imgAccList).mapIndexed { i, (imgUrl, imgAcc) ->
+            Page(i, imageUrl = "$imgUrl?$imgAcc")
         }
-    }
-
-    private val cryptoJS by lazy {
-        client.newCall(GET(CryptoJSUrl, headers)).execute().body!!.string()
     }
 
     override fun getFilterList() = mpFilters.getFilterList()
@@ -319,8 +285,5 @@ open class MangaPark(
     companion object {
 
         const val PREFIX_ID_SEARCH = "id:"
-
-        const val CryptoJSUrl =
-            "https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.0.0/crypto-js.min.js"
     }
 }

@@ -5,12 +5,12 @@ ext {
     extName = 'NHentai'
     pkgNameSuffix = 'all.nhentai'
     extClass = '.NHFactory'
-    extVersionCode = 31
+    extVersionCode = 39
     isNsfw = true
 }
 
 dependencies {
-    implementation project(':lib-ratelimit')
+    implementation(project(":lib-randomua"))
 }
 
 apply from: "$rootDir/common.gradle"

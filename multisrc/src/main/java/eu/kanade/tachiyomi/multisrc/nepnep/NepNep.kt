@@ -20,6 +20,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
@@ -32,7 +33,7 @@ import java.util.Locale
 abstract class NepNep(
     override val name: String,
     override val baseUrl: String,
-    override val lang: String
+    override val lang: String,
 ) : HttpSource() {
 
     override val supportsLatest = true
@@ -50,6 +51,7 @@ abstract class NepNep(
     private fun JsonElement.getString(key: String): String? {
         return this.jsonObject[key]!!.jsonPrimitive.contentOrNull
     }
+
     /** Returns value corresponding to given key as a JsonArray */
     private fun JsonElement.getArray(key: String): JsonArray {
         return this.jsonObject[key]!!.jsonArray
@@ -74,15 +76,17 @@ abstract class NepNep(
     }
 
     // don't use ";" for substringBefore() !
-    private fun directoryFromResponse(response: Response): JsonArray {
-        val str = response.asJsoup().select("script:containsData(MainFunction)").first().data()
+    private fun directoryFromDocument(document: Document): JsonArray {
+        val str = document.select("script:containsData(MainFunction)").first()!!.data()
             .substringAfter("vm.Directory = ").substringBefore("vm.GetIntValue").trim()
             .replace(";", " ")
         return json.parseToJsonElement(str).jsonArray
     }
 
     override fun popularMangaParse(response: Response): MangasPage {
-        directory = directoryFromResponse(response).sortedByDescending { it.getString("v") }
+        val document = response.asJsoup()
+        thumbnailUrl = document.select(".SearchResult > .SearchResultCover img").first()!!.attr("ng-src")
+        directory = directoryFromDocument(document).sortedByDescending { it.getString("v") }
         return parseDirectory(1)
     }
 
@@ -95,11 +99,22 @@ abstract class NepNep(
                 SManga.create().apply {
                     title = directory[i].getString("s")!!
                     url = "/manga/${directory[i].getString("i")}"
-                    thumbnail_url = "https://cover.nep.li/cover/${directory[i].getString("i")}.jpg"
-                }
+                    thumbnail_url = getThumbnailUrl(directory[i].getString("i")!!)
+                },
             )
         }
         return MangasPage(mangas, endRange < directory.lastIndex)
+    }
+
+    private var thumbnailUrl: String? = null
+
+    private fun getThumbnailUrl(id: String): String {
+        if (thumbnailUrl.isNullOrEmpty()) {
+            val response = client.newCall(popularMangaRequest(1)).execute()
+            thumbnailUrl = response.asJsoup().select(".SearchResult > .SearchResultCover img").first()!!.attr("ng-src")
+        }
+
+        return thumbnailUrl!!.replace("{{Result.i}}", id)
     }
 
     // Latest
@@ -119,7 +134,7 @@ abstract class NepNep(
     override fun latestUpdatesRequest(page: Int): Request = popularMangaRequest(1)
 
     override fun latestUpdatesParse(response: Response): MangasPage {
-        directory = directoryFromResponse(response).sortedByDescending { it.getString("lt") }
+        directory = directoryFromDocument(response.asJsoup()).sortedByDescending { it.getString("lt") }
         return parseDirectory(1)
     }
 
@@ -141,7 +156,7 @@ abstract class NepNep(
 
     private fun searchMangaParse(response: Response, query: String, filters: FilterList): MangasPage {
         val trimmedQuery = query.trim()
-        directory = directoryFromResponse(response)
+        directory = directoryFromDocument(response.asJsoup())
             .filter {
                 // Comparing query with display name
                 it.getString("s")!!.contains(trimmedQuery, ignoreCase = true) or
@@ -168,17 +183,21 @@ abstract class NepNep(
                         directory.sortedByDescending { it.getString(sortBy) }.reversed()
                     }
                 }
-                is SelectField -> if (filter.state != 0) directory = when (filter.name) {
-                    "Scan Status" -> directory.filter { it.getString("ss")!!.contains(filter.values[filter.state], ignoreCase = true) }
-                    "Publish Status" -> directory.filter { it.getString("ps")!!.contains(filter.values[filter.state], ignoreCase = true) }
-                    "Type" -> directory.filter { it.getString("t")!!.contains(filter.values[filter.state], ignoreCase = true) }
-                    "Translation" -> directory.filter { it.getString("o")!!.contains("yes", ignoreCase = true) }
-                    else -> directory
+                is SelectField -> if (filter.state != 0) {
+                    directory = when (filter.name) {
+                        "Scan Status" -> directory.filter { it.getString("ss")!!.contains(filter.values[filter.state], ignoreCase = true) }
+                        "Publish Status" -> directory.filter { it.getString("ps")!!.contains(filter.values[filter.state], ignoreCase = true) }
+                        "Type" -> directory.filter { it.getString("t")!!.contains(filter.values[filter.state], ignoreCase = true) }
+                        "Translation" -> directory.filter { it.getString("o")!!.contains("yes", ignoreCase = true) }
+                        else -> directory
+                    }
                 }
                 is YearField -> if (filter.state.isNotEmpty()) directory = directory.filter { it.getString("y")!!.contains(filter.state) }
-                is AuthorField -> if (filter.state.isNotEmpty()) directory = directory.filter { e ->
-                    e.getArray("a").any {
-                        it.jsonPrimitive.content.contains(filter.state, ignoreCase = true)
+                is AuthorField -> if (filter.state.isNotEmpty()) {
+                    directory = directory.filter { e ->
+                        e.getArray("a").any {
+                            it.jsonPrimitive.content.contains(filter.state, ignoreCase = true)
+                        }
                     }
                 }
                 is GenreList -> filter.state.forEach { genre ->
@@ -187,16 +206,21 @@ abstract class NepNep(
                         Filter.TriState.STATE_EXCLUDE -> genresNo.add(genre.name)
                     }
                 }
+                else -> continue
             }
         }
-        if (genres.isNotEmpty()) genres.map { genre ->
-            directory = directory.filter { e ->
-                e.getArray("g").any { it.jsonPrimitive.content.contains(genre, ignoreCase = true) }
+        if (genres.isNotEmpty()) {
+            genres.map { genre ->
+                directory = directory.filter { e ->
+                    e.getArray("g").any { it.jsonPrimitive.content.contains(genre, ignoreCase = true) }
+                }
             }
         }
-        if (genresNo.isNotEmpty()) genresNo.map { genre ->
-            directory = directory.filterNot { e ->
-                e.getArray("g").any { it.jsonPrimitive.content.contains(genre, ignoreCase = true) }
+        if (genresNo.isNotEmpty()) {
+            genresNo.map { genre ->
+                directory = directory.filterNot { e ->
+                    e.getArray("g").any { it.jsonPrimitive.content.contains(genre, ignoreCase = true) }
+                }
             }
         }
 
@@ -246,6 +270,8 @@ abstract class NepNep(
     private fun String.toStatus() = when {
         this.contains("Ongoing", ignoreCase = true) -> SManga.ONGOING
         this.contains("Complete", ignoreCase = true) -> SManga.COMPLETED
+        this.contains("Cancelled", ignoreCase = true) -> SManga.CANCELLED
+        this.contains("Hiatus", ignoreCase = true) -> SManga.ON_HIATUS
         else -> SManga.UNKNOWN
     }
 
@@ -282,7 +308,7 @@ abstract class NepNep(
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val vmChapters = response.asJsoup().select("script:containsData(MainFunction)").first().data()
+        val vmChapters = response.asJsoup().select("script:containsData(MainFunction)").first()!!.data()
             .substringAfter("vm.Chapters = ").substringBefore(";")
         return json.parseToJsonElement(vmChapters).jsonArray.map { json ->
             val indexChapter = json.getString("Chapter")!!
@@ -304,7 +330,7 @@ abstract class NepNep(
         val document = response.asJsoup()
         val script = document.selectFirst("script:containsData(MainFunction)")?.data()
             ?: client.newCall(GET(document.location().removeSuffix(".html"), headers))
-                .execute().asJsoup().selectFirst("script:containsData(MainFunction)").data()
+                .execute().asJsoup().selectFirst("script:containsData(MainFunction)")!!.data()
         val curChapter = json.parseToJsonElement(script!!.substringAfter("vm.CurChapter = ").substringBefore(";")).jsonObject
 
         val pageTotal = curChapter.getString("Page")!!.toInt()
@@ -314,8 +340,9 @@ abstract class NepNep(
                 .substringAfter("vm.CurPathName = \"", "")
                 .substringBefore("\"")
                 .also {
-                    if (it.isEmpty())
+                    if (it.isEmpty()) {
                         throw Exception("$name is overloaded and blocking Tachiyomi right now. Wait for unblock.")
+                    }
                 }
         val titleURI = script.substringAfter("vm.IndexName = \"").substringBefore("\"")
         val seasonURI = curChapter.getString("Directory")!!
@@ -349,7 +376,7 @@ abstract class NepNep(
         SelectField("Type", arrayOf("Any", "Doujinshi", "Manga", "Manhua", "Manhwa", "OEL", "One-shot")),
         SelectField("Translation", arrayOf("Any", "Official Only")),
         Sort(),
-        GenreList(getGenreList())
+        GenreList(getGenreList()),
     )
 
     // [...document.querySelectorAll("label.triStateCheckBox input")].map(el => `Filter("${el.getAttribute('name')}", "${el.nextSibling.textContent.trim()}")`).join(',\n')
@@ -391,6 +418,6 @@ abstract class NepNep(
         Genre("Supernatural"),
         Genre("Tragedy"),
         Genre("Yaoi"),
-        Genre("Yuri")
+        Genre("Yuri"),
     )
 }

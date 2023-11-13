@@ -2,14 +2,26 @@ package eu.kanade.tachiyomi.extension.id.pojokmanga
 
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
-class PojokManga : Madara("Pojok Manga", "https://pojokmanga.com", "id", SimpleDateFormat("MMM dd, yyyy", Locale.US)) {
+class PojokManga : Madara("Pojok Manga", "https://pojokmanga.net", "id", SimpleDateFormat("MMM dd, yyyy", Locale.US)) {
+
+    override val client: OkHttpClient = super.client.newBuilder()
+        .rateLimit(20, 4, TimeUnit.SECONDS)
+        .build()
+
+    override val useNewChapterEndpoint = true
+
+    override val mangaSubString = "komik"
+
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         var url = "$baseUrl/${searchPage(page)}".toHttpUrlOrNull()!!.newBuilder()
         url.addQueryParameter("s", query)
@@ -61,6 +73,7 @@ class PojokManga : Madara("Pojok Manga", "https://pojokmanga.com", "id", SimpleD
                         url = "$baseUrl/project/page/$page".toHttpUrlOrNull()!!.newBuilder()
                     }
                 }
+                else -> {}
             }
         }
         return GET(url.toString(), headers)
@@ -68,30 +81,26 @@ class PojokManga : Madara("Pojok Manga", "https://pojokmanga.com", "id", SimpleD
 
     override fun searchMangaSelector() = "div.c-tabs-item__content, div.page-item-detail"
 
+    override val mangaDetailsSelectorTag = "#toNotBeUsed"
+
     protected class ProjectFilter : UriPartFilter(
         "Filter Project",
         arrayOf(
             Pair("Show all manga", ""),
-            Pair("Show only project manga", "project-filter-on")
+            Pair("Show only project manga", "project-filter-on"),
+        ),
+    )
+
+    override fun getFilterList(): FilterList {
+        val filters = super.getFilterList().toMutableList()
+
+        filters += listOf(
+            Filter.Separator(),
+            Filter.Header("NOTE: cant be used with other filter!"),
+            Filter.Header("$name Project List page"),
+            ProjectFilter(),
         )
-    )
 
-    override fun getFilterList() = FilterList(
-        AuthorFilter(authorFilterTitle),
-        ArtistFilter(artistFilterTitle),
-        YearFilter(yearFilterTitle),
-        StatusFilter(statusFilterTitle, getStatusList()),
-        OrderByFilter(orderByFilterTitle, orderByFilterOptions.zip(orderByFilterOptionsValues)),
-        AdultContentFilter(adultContentFilterTitle, adultContentFilterOptions),
-        Filter.Separator(),
-        Filter.Header(genreFilterHeader),
-        GenreConditionFilter(genreConditionFilterTitle, genreConditionFilterOptions),
-        GenreList(genreFilterTitle, getGenreList()),
-        Filter.Separator(),
-        Filter.Header("NOTE: cant be used with other filter!"),
-        Filter.Header("$name Project List page"),
-        ProjectFilter(),
-    )
-
-    override val useNewChapterEndpoint = true
+        return FilterList(filters)
+    }
 }

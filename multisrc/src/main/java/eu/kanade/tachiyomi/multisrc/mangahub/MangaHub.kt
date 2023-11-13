@@ -1,7 +1,10 @@
 package eu.kanade.tachiyomi.multisrc.mangahub
 
+import eu.kanade.tachiyomi.lib.randomua.UserAgentType
+import eu.kanade.tachiyomi.lib.randomua.setRandomUserAgent
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,19 +13,25 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+import okhttp3.Cookie
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import rx.Observable
 import uy.kohesive.injekt.injectLazy
+import java.net.URLEncoder
 import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -32,54 +41,130 @@ abstract class MangaHub(
     override val name: String,
     override val baseUrl: String,
     override val lang: String,
-    private val dateFormat: SimpleDateFormat = SimpleDateFormat("MM-dd-yyyy", Locale.US)
+    private val dateFormat: SimpleDateFormat = SimpleDateFormat("MM-dd-yyyy", Locale.US),
 ) : ParsedHttpSource() {
 
     override val supportsLatest = true
 
-    private val json: Json by injectLazy()
+    private var baseApiUrl = "https://api.mghubcdn.com"
+    private var baseCdnUrl = "https://imgx.mghubcdn.com"
 
-    protected abstract val serverId: String
+    override val client: OkHttpClient = super.client.newBuilder()
+        .setRandomUserAgent(
+            userAgentType = UserAgentType.DESKTOP,
+            filterInclude = listOf("chrome"),
+        )
+        .addInterceptor(::apiAuthInterceptor)
+        .rateLimit(1)
+        .build()
 
-    protected open val cdnHost = " https://img.mghubcdn.com/".toHttpUrl()
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9")
+        .add("Accept-Language", "en-US,en;q=0.5")
+        .add("DNT", "1")
+        .add("Referer", "$baseUrl/")
+        .add("Sec-Fetch-Dest", "document")
+        .add("Sec-Fetch-Mode", "navigate")
+        .add("Sec-Fetch-Site", "same-origin")
+        .add("Upgrade-Insecure-Requests", "1")
 
-    // Popular
-    override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/popular/page/$page", headers)
+    open val json: Json by injectLazy()
 
-    override fun popularMangaParse(response: Response): MangasPage =
-        searchMangaParse(response)
+    private fun apiAuthInterceptor(chain: Interceptor.Chain): Response {
+        val originalRequest = chain.request()
 
-    override fun popularMangaSelector(): String =
-        "#mangalist div.media-manga.media"
+        val cookie = client.cookieJar
+            .loadForRequest(baseUrl.toHttpUrl())
+            .firstOrNull { it.name == "mhub_access" && it.value.isNotEmpty() }
 
-    override fun popularMangaFromElement(element: Element): SManga =
-        searchMangaFromElement(element)
+        val request =
+            if (originalRequest.url.toString() == "$baseApiUrl/graphql" && cookie != null) {
+                originalRequest.newBuilder()
+                    .header("x-mhub-access", cookie.value)
+                    .build()
+            } else {
+                originalRequest
+            }
 
-    override fun popularMangaNextPageSelector(): String? =
-        searchMangaNextPageSelector()
+        return chain.proceed(request)
+    }
 
-    // Latest
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/updates/page/$page", headers)
+    private fun refreshApiKey(chapter: SChapter) {
+        val now = Calendar.getInstance().time.time
 
-    override fun latestUpdatesParse(response: Response): MangasPage =
-        searchMangaParse(response)
+        val slug = "$baseUrl${chapter.url}"
+            .toHttpUrlOrNull()
+            ?.pathSegments
+            ?.get(1)
 
-    override fun latestUpdatesSelector(): String =
-        popularMangaSelector()
+        val url = if (slug != null) {
+            "$baseUrl/manga/$slug".toHttpUrl()
+        } else {
+            baseUrl.toHttpUrl()
+        }
 
-    override fun latestUpdatesFromElement(element: Element): SManga =
-        searchMangaFromElement(element)
+        // Clear key cookie
+        val cookie = Cookie.parse(url, "mhub_access=; Max-Age=0; Path=/")!!
+        client.cookieJar.saveFromResponse(url, listOf(cookie))
 
-    override fun latestUpdatesNextPageSelector(): String? =
-        searchMangaNextPageSelector()
+        // Set required cookie (for cache busting?)
+        val recently = buildJsonObject {
+            putJsonObject((now - (0..3600).random()).toString()) {
+                put("mangaID", (1..42_000).random())
+                put("number", (1..20).random())
+            }
+        }.toString()
 
-    // Search
+        client.cookieJar.saveFromResponse(
+            url,
+            listOf(
+                Cookie.Builder()
+                    .domain(url.host)
+                    .name("recently")
+                    .value(URLEncoder.encode(recently, "utf-8"))
+                    .expiresAt(now + 2 * 60 * 60 * 24 * 31) // +2 months
+                    .build(),
+            ),
+        )
+
+        val request = GET("$url?reloadKey=1", headers)
+        client.newCall(request).execute()
+    }
+
+    // popular
+    override fun popularMangaRequest(page: Int): Request {
+        return GET("$baseUrl/popular/page/$page", headers)
+    }
+
+    override fun popularMangaSelector() = ".col-sm-6:not(:has(a:contains(Yaoi)))"
+
+    override fun popularMangaFromElement(element: Element): SManga {
+        return SManga.create().apply {
+            setUrlWithoutDomain(element.select("h4 a").attr("abs:href"))
+            title = element.select("h4 a").text()
+            thumbnail_url = element.select("img").attr("abs:src")
+        }
+    }
+
+    override fun popularMangaNextPageSelector() = "ul.pager li.next > a"
+
+    // latest
+    override fun latestUpdatesRequest(page: Int): Request {
+        return GET("$baseUrl/updates/page/$page", headers)
+    }
+
+    override fun latestUpdatesSelector() = popularMangaSelector()
+
+    override fun latestUpdatesFromElement(element: Element): SManga {
+        return popularMangaFromElement(element)
+    }
+
+    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
+
+    // search
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        // https://mangahub.io/search/page/1?q=a&order=POPULAR&genre=all
-        val url = "$baseUrl/search/page/$page".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
+        val url = "$baseUrl/search/page/$page".toHttpUrlOrNull()!!.newBuilder()
+        url.addQueryParameter("q", query)
         (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
             when (filter) {
                 is OrderBy -> {
@@ -96,6 +181,13 @@ abstract class MangaHub(
         return GET(url.toString(), headers)
     }
 
+    override fun searchMangaSelector() = popularMangaSelector()
+
+    override fun searchMangaFromElement(element: Element): SManga {
+        return popularMangaFromElement(element)
+    }
+
+    // not sure if this still works, some duplicates i found is also using different thumbnail_url
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
@@ -115,69 +207,79 @@ abstract class MangaHub(
             values.minByOrNull { it.url.length }!!
         }.values.toList()
 
-        val hasNextPage = searchMangaNextPageSelector()?.let { selector ->
+        val hasNextPage = searchMangaNextPageSelector().let { selector ->
             document.select(selector).first()
         } != null
 
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun searchMangaSelector() = "div#mangalist div.media-manga.media"
+    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
 
-    override fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
-        val titleElement = element.select(".media-heading > a").first()
-        setUrlWithoutDomain(titleElement.attr("abs:href"))
+    // manga details
+    override fun mangaDetailsParse(document: Document): SManga {
+        val manga = SManga.create()
+        manga.title = document.select(".breadcrumb .active span").text()
+        manga.author = document.select("div:has(h1) span:contains(Author) + span").first()?.text()
+        manga.artist = document.select("div:has(h1) span:contains(Artist) + span").first()?.text()
+        manga.genre = document.select(".row p a").joinToString { it.text() }
+        manga.description = document.select(".tab-content p").first()?.text()
+        manga.thumbnail_url = document.select("img.img-responsive").first()
+            ?.attr("src")
 
-        title = titleElement.text()
-        thumbnail_url = element
-            .select("img.manga-thumb.list-item-thumb")
-            ?.first()?.attr("abs:src")
-    }
-
-    override fun searchMangaNextPageSelector() = "ul.pager li.next > a"
-
-    // Details
-    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        title = document.select("h1._3xnDj").first().ownText()
-        author = document
-            .select("._3QCtP > div:nth-child(2) > div:nth-child(1) > span:nth-child(2)")
-            ?.first()?.text()
-        artist = document
-            .select("._3QCtP > div:nth-child(2) > div:nth-child(2) > span:nth-child(2)")
-            ?.first()?.text()
-        genre = document.select("._3Czbn a")?.joinToString { it.text() }
-        description = document.select("div#noanim-content-tab-pane-99 p.ZyMp7")?.first()?.text()
-        thumbnail_url = document.select("img.img-responsive")?.first()?.attr("abs:src")
-
-        document.select("._3QCtP > div:nth-child(2) > div:nth-child(3) > span:nth-child(2)")
-            ?.first()?.text()?.also { statusText ->
-                status = when {
-                    statusText.contains("ongoing", true) -> SManga.ONGOING
-                    statusText.contains("completed", true) -> SManga.COMPLETED
-                    else -> SManga.UNKNOWN
-                }
+        document.select("div:has(h1) span:contains(Status) + span").first()?.text()?.also { statusText ->
+            when {
+                statusText.contains("ongoing", true) -> manga.status = SManga.ONGOING
+                statusText.contains("completed", true) -> manga.status = SManga.COMPLETED
+                else -> manga.status = SManga.UNKNOWN
             }
+        }
 
         // add alternative name to manga description
-        val altName = "Alternative Name: "
-        document.select("h1 small").firstOrNull()?.ownText()?.let {
-            if (it.isBlank().not()) {
-                description = when {
-                    description.isNullOrBlank() -> altName + it
-                    else -> description + "\n\n$altName" + it
+        document.select("h1 small").firstOrNull()?.ownText()?.let { alternativeName ->
+            if (alternativeName.isNotBlank()) {
+                manga.description = manga.description.orEmpty().let {
+                    if (it.isBlank()) {
+                        "Alternative Name: $alternativeName"
+                    } else {
+                        "$it\n\nAlternative Name: $alternativeName"
+                    }
                 }
             }
         }
+
+        return manga
     }
 
-    // Chapters
-    override fun chapterListSelector() = ".tab-content .tab-pane li.list-group-item > a"
+    // chapters
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val document = response.asJsoup()
+        val head = document.head()
+        return document.select(chapterListSelector()).map { chapterFromElement(it, head) }
+    }
 
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        setUrlWithoutDomain(element.attr("abs:href"))
-        name = element.select("span._8Qtbo").text()
-        date_upload = element.select("small.UovLc").first()?.text()
-            ?.let { parseChapterDate(it) } ?: 0
+    override fun chapterListSelector() = ".tab-content ul li"
+
+    private fun chapterFromElement(element: Element, head: Element): SChapter {
+        val chapter = SChapter.create()
+        val potentialLinks = element.select("a[href*='$baseUrl/chapter/']:not([rel*=nofollow]):not([rel*=noreferrer])")
+        var visibleLink = ""
+        potentialLinks.forEach { a ->
+            val className = a.className()
+            val styles = head.select("style").html()
+            if (!styles.contains(".$className { display:none; }")) {
+                visibleLink = a.attr("href")
+                return@forEach
+            }
+        }
+        chapter.setUrlWithoutDomain(visibleLink)
+        chapter.name = chapter.url.trimEnd('/').substringAfterLast('/').replace('-', ' ')
+        chapter.date_upload = element.select("small.UovLc").first()?.text()?.let { parseChapterDate(it) } ?: 0
+        return chapter
+    }
+
+    override fun chapterFromElement(element: Element): SChapter {
+        throw UnsupportedOperationException("Not Used")
     }
 
     private fun parseChapterDate(date: String): Long {
@@ -211,58 +313,99 @@ abstract class MangaHub(
             else -> {
                 try {
                     parsedDate = dateFormat.parse(date)?.time ?: 0L
-                } catch (e: ParseException) {
-                    /* nothing to do, parsedDate is initialized with 0L */
-                }
+                } catch (e: ParseException) { /*nothing to do, parsedDate is initialized with 0L*/ }
             }
         }
         return parsedDate
     }
 
-    // Pages
+    // pages
     override fun pageListRequest(chapter: SChapter): Request {
-        val jsonHeaders = headers.newBuilder().add("Content-Type", "application/json").build()
+        val body = buildJsonObject {
+            put("query", PAGES_QUERY)
+            put(
+                "variables",
+                buildJsonObject {
+                    val mangaSource = when (name) {
+                        "MangaHub" -> "m01"
+                        "MangaReader.site" -> "mr01"
+                        "MangaPanda.onl" -> "mr02"
+                        else -> null
+                    }
+                    val chapterUrl = chapter.url.split("/")
 
-        val slug = chapter.url
-            .substringAfter("chapter/")
-            .substringBefore("/")
-        val number = chapter.url
-            .substringAfter("chapter-")
-            .removeSuffix("/")
-        val body =
-            "{\"query\":\"{chapter(x:$serverId,slug:\\\"$slug\\\",number:$number){id,title,mangaID,number,slug,date,pages,noAd,manga{id,title,slug,mainSlug,author,isWebtoon,isYaoi,isPorn,isSoftPorn,unauthFile,isLicensed}}}\"}".toRequestBody(
-                null
+                    put("mangaSource", mangaSource)
+                    put("slug", chapterUrl[2])
+                    put("number", chapterUrl[3].substringAfter("-").toFloat())
+                },
             )
+        }
+            .toString()
+            .toRequestBody()
 
-        return POST("https://api.mghubcdn.com/graphql", jsonHeaders, body)
+        val newHeaders = headersBuilder()
+            .set("Accept", "application/json")
+            .set("Content-Type", "application/json")
+            .set("Origin", baseUrl)
+            .set("Sec-Fetch-Dest", "empty")
+            .set("Sec-Fetch-Mode", "cors")
+            .set("Sec-Fetch-Site", "cross-site")
+            .removeAll("Upgrade-Insecure-Requests")
+            .build()
+
+        return POST("$baseApiUrl/graphql", newHeaders, body)
     }
 
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> =
+        super.fetchPageList(chapter)
+            .doOnError { refreshApiKey(chapter) }
+            .retry(1)
+
+    override fun pageListParse(document: Document): List<Page> = throw UnsupportedOperationException("Not used")
     override fun pageListParse(response: Response): List<Page> {
-        val cdn = "https://img.mghubcdn.com/file/imghub"
-        val chapterObject = json
-            .decodeFromString<GraphQLDataDto<ChapterDto>>(response.body!!.string())
+        val chapterObject = json.decodeFromString<ApiChapterPagesResponse>(response.body.string())
 
-        val pagesObject = json
-            .decodeFromString<JsonObject>(chapterObject.data.chapter.pages)
-        val pages = pagesObject.values.map { it.jsonPrimitive.content }
+        if (chapterObject.data?.chapter == null) {
+            if (chapterObject.errors != null) {
+                val errors = chapterObject.errors.joinToString("\n") { it.message }
+                throw Exception(errors)
+            }
+            throw Exception("Unknown error while processing pages")
+        }
 
-        return pages.mapIndexed { i, path -> Page(i, "", "$cdn/$path") }
+        val pages = json.decodeFromString<ApiChapterPages>(chapterObject.data.chapter.pages)
+
+        return pages.i.mapIndexed { i, page ->
+            Page(i, "", "$baseCdnUrl/${pages.p}$page")
+        }
     }
-
-    override fun pageListParse(document: Document): List<Page> =
-        throw UnsupportedOperationException("Not used.")
 
     // Image
-    override fun imageUrlParse(document: Document): String =
-        throw UnsupportedOperationException("Not used.")
+    override fun imageUrlRequest(page: Page): Request {
+        val newHeaders = headersBuilder()
+            .set("Accept", "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+            .set("Sec-Fetch-Dest", "image")
+            .set("Sec-Fetch-Mode", "no-cors")
+            .set("Sec-Fetch-Site", "cross-site")
+            .removeAll("Upgrade-Insecure-Requests")
+            .build()
 
-    // Filters
+        return GET(page.url, newHeaders)
+    }
+
+    override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException("Not used")
+
+    // filters
     private class Genre(title: String, val key: String) : Filter.TriState(title) {
-        override fun toString(): String = name
+        override fun toString(): String {
+            return name
+        }
     }
 
     private class Order(title: String, val key: String) : Filter.TriState(title) {
-        override fun toString(): String = name
+        override fun toString(): String {
+            return name
+        }
     }
 
     private class OrderBy(orders: Array<Order>) : Filter.Select<Order>("Order", orders, 0)
@@ -270,7 +413,7 @@ abstract class MangaHub(
 
     override fun getFilterList() = FilterList(
         OrderBy(orderBy),
-        GenreList(genres)
+        GenreList(genres),
     )
 
     private val orderBy = arrayOf(
@@ -278,7 +421,7 @@ abstract class MangaHub(
         Order("Updates", "LATEST"),
         Order("A-Z", "ALPHABET"),
         Order("New", "NEW"),
-        Order("Completed", "COMPLETED")
+        Order("Completed", "COMPLETED"),
     )
 
     private val genres = arrayOf(
@@ -286,7 +429,6 @@ abstract class MangaHub(
         Genre("[no chapters]", "no-chapters"),
         Genre("4-Koma", "4-koma"),
         Genre("Action", "action"),
-        Genre("Adult", "adult"),
         Genre("Adventure", "adventure"),
         Genre("Award Winning", "award-winning"),
         Genre("Comedy", "comedy"),
@@ -346,46 +488,6 @@ abstract class MangaHub(
         Genre("Webtoon", "webtoon"),
         Genre("Webtoons", "webtoons"),
         Genre("Wuxia", "wuxia"),
-        Genre("Yaoi", "yaoi"),
-        Genre("Yuri", "yuri")
+        Genre("Yuri", "yuri"),
     )
 }
-
-// DTO
-@Serializable
-data class GraphQLDataDto<T>(
-    val data: T
-)
-
-@Serializable
-data class ChapterDto(
-    val chapter: ChapterInnerDto
-)
-
-@Serializable
-data class ChapterInnerDto(
-    val date: String,
-    val id: Int,
-    val manga: MangaInnerDto,
-    @SerialName("mangaID") val mangaId: Int,
-    val noAd: Boolean,
-    val number: Float,
-    val pages: String,
-    val slug: String,
-    val title: String
-)
-
-@Serializable
-data class MangaInnerDto(
-    val author: String,
-    val id: Int,
-    val isLicensed: Boolean,
-    val isPorn: Boolean,
-    val isSoftPorn: Boolean,
-    val isWebtoon: Boolean,
-    val isYaoi: Boolean,
-    val mainSlug: String,
-    val slug: String,
-    val title: String,
-    val unauthFile: Boolean
-)

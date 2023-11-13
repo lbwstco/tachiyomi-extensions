@@ -2,10 +2,15 @@ package eu.kanade.tachiyomi.extension.all.komga
 
 import android.app.Application
 import android.content.SharedPreferences
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.util.Log
+import android.widget.Button
 import android.widget.Toast
-import eu.kanade.tachiyomi.extension.BuildConfig
+import androidx.preference.EditTextPreference
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.AppInfo
 import eu.kanade.tachiyomi.extension.all.komga.dto.AuthorDto
 import eu.kanade.tachiyomi.extension.all.komga.dto.BookDto
 import eu.kanade.tachiyomi.extension.all.komga.dto.CollectionDto
@@ -15,8 +20,10 @@ import eu.kanade.tachiyomi.extension.all.komga.dto.PageWrapperDto
 import eu.kanade.tachiyomi.extension.all.komga.dto.ReadListDto
 import eu.kanade.tachiyomi.extension.all.komga.dto.SeriesDto
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservableSuccess
+import eu.kanade.tachiyomi.network.asObservable
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.UnmeteredSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -40,13 +47,11 @@ import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
 import java.security.MessageDigest
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
-open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
+open class Komga(private val suffix: String = "") : ConfigurableSource, UnmeteredSource, HttpSource() {
     override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/api/v1/series?page=${page - 1}&deleted=false", headers)
+        GET("$baseUrl/api/v1/series?page=${page - 1}&deleted=false&sort=metadata.titleSort,asc", headers)
 
     override fun popularMangaParse(response: Response): MangasPage =
         processSeriesPage(response)
@@ -103,7 +108,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                     val statusToInclude = mutableListOf<String>()
                     filter.state.forEach { content ->
                         if (content.state) {
-                            statusToInclude.add(content.name.toUpperCase(Locale.ROOT))
+                            statusToInclude.add(content.name.uppercase(Locale.ROOT))
                         }
                     }
                     if (statusToInclude.isNotEmpty()) {
@@ -156,7 +161,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 }
                 is Filter.Sort -> {
                     var sortCriteria = when (filter.state?.index) {
-                        0 -> "metadata.titleSort"
+                        0 -> if (type == "series") "metadata.titleSort" else "name"
                         1 -> "createdDate"
                         2 -> "lastModifiedDate"
                         else -> ""
@@ -166,6 +171,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                         url.addQueryParameter("sort", sortCriteria)
                     }
                 }
+                else -> {}
             }
         }
 
@@ -177,7 +183,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
 
     override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
         return client.newCall(GET(manga.url, headers))
-            .asObservableSuccess()
+            .asObservable()
             .map { response ->
                 mangaDetailsParse(response).apply { initialized = true }
             }
@@ -187,10 +193,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
         GET(manga.url.replaceFirst("api/v1/", "", ignoreCase = true), headers)
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val responseBody = response.body
-            ?: throw IllegalStateException("Response code ${response.code}")
-
-        return responseBody.use { body ->
+        return response.body.use { body ->
             if (response.fromReadList()) {
                 val readList = json.decodeFromString<ReadListDto>(body.string())
                 readList.toSManga()
@@ -206,8 +209,6 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val responseBody = response.body
-            ?: throw IllegalStateException("Response code ${response.code}")
-
         val page = responseBody.use { json.decodeFromString<PageWrapperDto<BookDto>>(it.string()).content }
 
         val r = page.mapIndexed { index, book ->
@@ -228,8 +229,6 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val responseBody = response.body
-            ?: throw IllegalStateException("Response code ${response.code}")
-
         val pages = responseBody.use { json.decodeFromString<List<PageDto>>(it.string()) }
         return pages.map {
             val url = "${response.request.url}/${it.number}" +
@@ -240,15 +239,17 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 }
             Page(
                 index = it.number - 1,
-                imageUrl = url
+                imageUrl = url,
             )
         }
     }
 
+    override fun getMangaUrl(manga: SManga) = manga.url.replace("/api/v1", "")
+
+    override fun getChapterUrl(chapter: SChapter) = chapter.url.replace("/api/v1/books", "/book")
+
     private fun processSeriesPage(response: Response): MangasPage {
         val responseBody = response.body
-            ?: throw IllegalStateException("Response code ${response.code}")
-
         return responseBody.use { body ->
             if (response.fromReadList()) {
                 with(json.decodeFromString<PageWrapperDto<ReadListDto>>(body.string())) {
@@ -267,9 +268,12 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
             title = metadata.title
             url = "$baseUrl/api/v1/series/$id"
             thumbnail_url = "$url/thumbnail"
-            status = when (metadata.status) {
-                "ONGOING" -> SManga.ONGOING
-                "ENDED" -> SManga.COMPLETED
+            status = when {
+                metadata.status == "ENDED" && metadata.totalBookCount != null && booksCount < metadata.totalBookCount -> SManga.PUBLISHING_FINISHED
+                metadata.status == "ENDED" -> SManga.COMPLETED
+                metadata.status == "ONGOING" -> SManga.ONGOING
+                metadata.status == "ABANDONED" -> SManga.CANCELLED
+                metadata.status == "HIATUS" -> SManga.ON_HIATUS
                 else -> SManga.UNKNOWN
             }
             genre = (metadata.genres + metadata.tags + booksMetadata.tags).distinct().joinToString(", ")
@@ -292,27 +296,27 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
     private fun Response.fromReadList() = request.url.toString().contains("/api/v1/readlists")
 
     private fun parseDate(date: String?): Long =
-        if (date == null)
-            Date().time
-        else {
+        if (date == null) {
+            0
+        } else {
             try {
-                SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(date).time
+                KomgaHelper.formatterDate.parse(date)?.time ?: 0
             } catch (ex: Exception) {
-                Date().time
+                0
             }
         }
 
     private fun parseDateTime(date: String?): Long =
-        if (date == null)
-            Date().time
-        else {
+        if (date == null) {
+            0
+        } else {
             try {
-                SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).parse(date).time
+                KomgaHelper.formatterDateTime.parse(date)?.time ?: 0
             } catch (ex: Exception) {
                 try {
-                    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.S", Locale.US).parse(date).time
+                    KomgaHelper.formatterDateTimeMilli.parse(date)?.time ?: 0
                 } catch (ex: Exception) {
-                    Date().time
+                    0
                 }
             }
         }
@@ -340,7 +344,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
 
     private data class CollectionFilterEntry(
         val name: String,
-        val id: String? = null
+        val id: String? = null,
     ) {
         override fun toString() = name
     }
@@ -353,11 +357,11 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 ReadFilter(),
                 TypeSelect(),
                 CollectionSelect(listOf(CollectionFilterEntry("None")) + collections.map { CollectionFilterEntry(it.name, it.id) }),
-                LibraryGroup(libraries.map { LibraryFilter(it.id, it.name) }.sortedBy { it.name.toLowerCase(Locale.ROOT) }),
+                LibraryGroup(libraries.map { LibraryFilter(it.id, it.name) }.sortedBy { it.name.lowercase(Locale.ROOT) }),
                 StatusGroup(listOf("Ongoing", "Ended", "Abandoned", "Hiatus").map { StatusFilter(it) }),
                 GenreGroup(genres.map { GenreFilter(it) }),
                 TagGroup(tags.map { TagFilter(it) }),
-                PublisherGroup(publishers.map { PublisherFilter(it) })
+                PublisherGroup(publishers.map { PublisherFilter(it) }),
             ).also { list ->
                 list.addAll(authors.map { (role, authors) -> AuthorGroup(role, authors.map { AuthorFilter(it) }) })
                 list.add(SeriesSort())
@@ -377,30 +381,31 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
     private var publishers = emptySet<String>()
     private var authors = emptyMap<String, List<AuthorDto>>() // roles to list of authors
 
-    override val name = "Komga${if (suffix.isNotBlank()) " ($suffix)" else ""}"
-    override val lang = "all"
-    override val supportsLatest = true
-    private val LOG_TAG = "extension.all.komga${if (suffix.isNotBlank()) ".$suffix" else ""}"
-
     // keep the previous ID when lang was "en", so that preferences and manga bindings are not lost
     override val id by lazy {
-        val key = "${name.toLowerCase()}/en/$versionId"
+        val key = "komga${if (suffix.isNotBlank()) " ($suffix)" else ""}/en/$versionId"
         val bytes = MessageDigest.getInstance("MD5").digest(key.toByteArray())
         (0..7).map { bytes[it].toLong() and 0xff shl 8 * (7 - it) }.reduce(Long::or) and Long.MAX_VALUE
     }
 
-    override val baseUrl by lazy { getPrefBaseUrl() }
-    private val username by lazy { getPrefUsername() }
-    private val password by lazy { getPrefPassword() }
+    private val displayName by lazy { preferences.displayName }
+    final override val baseUrl by lazy { preferences.baseUrl }
+    private val username by lazy { preferences.username }
+    private val password by lazy { preferences.password }
     private val json: Json by injectLazy()
 
     override fun headersBuilder(): Headers.Builder =
         Headers.Builder()
-            .add("User-Agent", "TachiyomiKomga/${BuildConfig.VERSION_NAME}")
+            .add("User-Agent", "TachiyomiKomga/${AppInfo.getVersionName()}")
 
     private val preferences: SharedPreferences by lazy {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }
+
+    override val name = "Komga${displayName.ifBlank { suffix }.let { if (it.isNotBlank()) " ($it)" else "" }}"
+    override val lang = "all"
+    override val supportsLatest = true
+    private val LOG_TAG = "extension.all.komga${if (suffix.isNotBlank()) ".$suffix" else ""}"
 
     override val client: OkHttpClient =
         network.client.newBuilder()
@@ -416,29 +421,84 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
             .dns(Dns.SYSTEM) // don't use DNS over HTTPS as it breaks IP addressing
             .build()
 
-    override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
-        screen.addPreference(screen.editTextPreference(ADDRESS_TITLE, ADDRESS_DEFAULT, baseUrl))
-        screen.addPreference(screen.editTextPreference(USERNAME_TITLE, USERNAME_DEFAULT, username))
-        screen.addPreference(screen.editTextPreference(PASSWORD_TITLE, PASSWORD_DEFAULT, password, true))
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        screen.addEditTextPreference(
+            title = "Source display name",
+            default = suffix,
+            summary = displayName.ifBlank { "Here you can change the source displayed suffix" },
+            key = PREF_DISPLAYNAME,
+        )
+        screen.addEditTextPreference(
+            title = "Address",
+            default = ADDRESS_DEFAULT,
+            summary = baseUrl.ifBlank { "The server address" },
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
+            validate = { it.toHttpUrlOrNull() != null },
+            validationMessage = "The URL is invalid or malformed",
+            key = PREF_ADDRESS,
+        )
+        screen.addEditTextPreference(
+            title = "Username",
+            default = USERNAME_DEFAULT,
+            summary = username.ifBlank { "The user account email" },
+            key = PREF_USERNAME,
+        )
+        screen.addEditTextPreference(
+            title = "Password",
+            default = PASSWORD_DEFAULT,
+            summary = if (password.isBlank()) "The user account password" else "*".repeat(password.length),
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            key = PREF_PASSWORD,
+        )
     }
 
-    private fun androidx.preference.PreferenceScreen.editTextPreference(title: String, default: String, value: String, isPassword: Boolean = false): androidx.preference.EditTextPreference {
-        return androidx.preference.EditTextPreference(context).apply {
-            key = title
+    private fun PreferenceScreen.addEditTextPreference(
+        title: String,
+        default: String,
+        summary: String,
+        inputType: Int? = null,
+        validate: ((String) -> Boolean)? = null,
+        validationMessage: String? = null,
+        key: String = title,
+    ) {
+        val preference = EditTextPreference(context).apply {
+            this.key = key
             this.title = title
-            summary = value
+            this.summary = summary
             this.setDefaultValue(default)
             dialogTitle = title
 
-            if (isPassword) {
-                setOnBindEditTextListener {
-                    it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setOnBindEditTextListener { editText ->
+                if (inputType != null) {
+                    editText.inputType = inputType
+                }
+
+                if (validate != null) {
+                    editText.addTextChangedListener(
+                        object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+
+                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+
+                            override fun afterTextChanged(editable: Editable?) {
+                                requireNotNull(editable)
+
+                                val text = editable.toString()
+
+                                val isValid = text.isBlank() || validate(text)
+
+                                editText.error = if (!isValid) validationMessage else null
+                                editText.rootView.findViewById<Button>(android.R.id.button1)
+                                    ?.isEnabled = editText.error == null
+                            }
+                        },
+                    )
                 }
             }
 
             setOnPreferenceChangeListener { _, newValue ->
                 try {
-                    val res = preferences.edit().putString(title, newValue as String).commit()
+                    val res = preferences.edit().putString(this.key, newValue as String).commit()
                     Toast.makeText(context, "Restart Tachiyomi to apply new setting.", Toast.LENGTH_LONG).show()
                     res
                 } catch (e: Exception) {
@@ -447,11 +507,21 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 }
             }
         }
+
+        addPreference(preference)
     }
 
-    private fun getPrefBaseUrl(): String = preferences.getString(ADDRESS_TITLE, ADDRESS_DEFAULT)!!
-    private fun getPrefUsername(): String = preferences.getString(USERNAME_TITLE, USERNAME_DEFAULT)!!
-    private fun getPrefPassword(): String = preferences.getString(PASSWORD_TITLE, PASSWORD_DEFAULT)!!
+    private val SharedPreferences.displayName
+        get() = getString(PREF_DISPLAYNAME, "")!!
+
+    private val SharedPreferences.baseUrl
+        get() = getString(PREF_ADDRESS, ADDRESS_DEFAULT)!!.removeSuffix("/")
+
+    private val SharedPreferences.username
+        get() = getString(PREF_USERNAME, USERNAME_DEFAULT)!!
+
+    private val SharedPreferences.password
+        get() = getString(PREF_PASSWORD, PASSWORD_DEFAULT)!!
 
     init {
         if (baseUrl.isNotBlank()) {
@@ -460,12 +530,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                     client.newCall(GET("$baseUrl/api/v1/libraries", headers)).execute().use { response ->
                         libraries = try {
                             val responseBody = response.body
-                            if (responseBody != null) {
-                                responseBody.use { json.decodeFromString(it.string()) }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for libraries filter: response body is null. Response code: ${response.code}")
-                                emptyList()
-                            }
+                            responseBody.use { json.decodeFromString(it.string()) }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for libraries filter", e)
                             emptyList()
@@ -479,12 +544,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                     client.newCall(GET("$baseUrl/api/v1/collections?unpaged=true", headers)).execute().use { response ->
                         collections = try {
                             val responseBody = response.body
-                            if (responseBody != null) {
-                                responseBody.use { json.decodeFromString<PageWrapperDto<CollectionDto>>(it.string()).content }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for collections filter: response body is null. Response code: ${response.code}")
-                                emptyList()
-                            }
+                            responseBody.use { json.decodeFromString<PageWrapperDto<CollectionDto>>(it.string()).content }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for collections filter", e)
                             emptyList()
@@ -498,12 +558,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                     client.newCall(GET("$baseUrl/api/v1/genres", headers)).execute().use { response ->
                         genres = try {
                             val responseBody = response.body
-                            if (responseBody != null) {
-                                responseBody.use { json.decodeFromString(it.string()) }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for genres filter: response body is null. Response code: ${response.code}")
-                                emptySet()
-                            }
+                            responseBody.use { json.decodeFromString(it.string()) }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for genres filter", e)
                             emptySet()
@@ -516,13 +571,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 try {
                     client.newCall(GET("$baseUrl/api/v1/tags", headers)).execute().use { response ->
                         tags = try {
-                            val responseBody = response.body
-                            if (responseBody != null) {
-                                responseBody.use { json.decodeFromString(it.string()) }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for tags filter: response body is null. Response code: ${response.code}")
-                                emptySet()
-                            }
+                            response.body.use { json.decodeFromString(it.string()) }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for tags filter", e)
                             emptySet()
@@ -535,13 +584,7 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 try {
                     client.newCall(GET("$baseUrl/api/v1/publishers", headers)).execute().use { response ->
                         publishers = try {
-                            val responseBody = response.body
-                            if (responseBody != null) {
-                                responseBody.use { json.decodeFromString(it.string()) }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for publishers filter: response body is null. Response code: ${response.code}")
-                                emptySet()
-                            }
+                            response.body.use { json.decodeFromString(it.string()) }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for publishers filter", e)
                             emptySet()
@@ -554,14 +597,9 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                 try {
                     client.newCall(GET("$baseUrl/api/v1/authors", headers)).execute().use { response ->
                         authors = try {
-                            val responseBody = response.body
-                            if (responseBody != null) {
-                                val list: List<AuthorDto> = responseBody.use { json.decodeFromString(it.string()) }
-                                list.groupBy { it.role }
-                            } else {
-                                Log.e(LOG_TAG, "error while decoding JSON for authors filter: response body is null. Response code: ${response.code}")
-                                emptyMap()
-                            }
+                            response.body
+                                .use { json.decodeFromString<List<AuthorDto>>(it.string()) }
+                                .groupBy { it.role }
                         } catch (e: Exception) {
                             Log.e(LOG_TAG, "error while decoding JSON for authors filter", e)
                             emptyMap()
@@ -577,20 +615,21 @@ open class Komga(suffix: String = "") : ConfigurableSource, HttpSource() {
                     {},
                     { tr ->
                         Log.e(LOG_TAG, "error while doing initial calls", tr)
-                    }
+                    },
                 )
         }
     }
 
     companion object {
-        private const val ADDRESS_TITLE = "Address"
+        private const val PREF_DISPLAYNAME = "Source display name"
+        private const val PREF_ADDRESS = "Address"
         private const val ADDRESS_DEFAULT = ""
-        private const val USERNAME_TITLE = "Username"
+        private const val PREF_USERNAME = "Username"
         private const val USERNAME_DEFAULT = ""
-        private const val PASSWORD_TITLE = "Password"
+        private const val PREF_PASSWORD = "Password"
         private const val PASSWORD_DEFAULT = ""
 
-        private val supportedImageTypes = listOf("image/jpeg", "image/png", "image/gif", "image/webp", "image/jxl")
+        private val supportedImageTypes = listOf("image/jpeg", "image/png", "image/gif", "image/webp", "image/jxl", "image/heif", "image/avif")
 
         private const val TYPE_SERIES = "Series"
         private const val TYPE_READLISTS = "Read lists"

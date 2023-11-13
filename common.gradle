@@ -3,11 +3,13 @@ apply plugin: 'org.jmailen.kotlinter'
 android {
     compileSdkVersion AndroidConfig.compileSdk
 
+    namespace "eu.kanade.tachiyomi.extension"
     sourceSets {
         main {
             manifest.srcFile "AndroidManifest.xml"
             java.srcDirs = ['src']
             res.srcDirs = ['res']
+            assets.srcDirs = ['assets']
         }
         release {
             manifest.srcFile "AndroidManifest.xml"
@@ -22,11 +24,10 @@ android {
         targetSdkVersion AndroidConfig.targetSdk
         applicationIdSuffix pkgNameSuffix
         versionCode extVersionCode
-        versionName project.ext.properties.getOrDefault("libVersion", "1.2") + ".$extVersionCode"
+        versionName project.ext.properties.getOrDefault("libVersion", "1.4") + ".$extVersionCode"
         setProperty("archivesBaseName", "tachiyomi-$pkgNameSuffix-v$versionName")
         def readmes = project.projectDir.listFiles({ File file ->
-            file.name.equals("README.md") ||
-            file.name.equals("CHANGELOG.md")
+            file.name == "README.md" || file.name == "CHANGELOG.md"
         } as FileFilter)
         def hasReadme = readmes != null && readmes.any { File file ->
             file.name.startsWith("README")
@@ -79,7 +80,15 @@ android {
 
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_1_8.toString()
-        freeCompilerArgs += "-Xopt-in=kotlinx.serialization.ExperimentalSerializationApi"
+        freeCompilerArgs += "-opt-in=kotlinx.serialization.ExperimentalSerializationApi"
+    }
+
+    kotlinter {
+        experimentalRules = true
+        disabledRules = [
+            "experimental:argument-list-wrapping", // Doesn't play well with Android Studio
+            "experimental:comment-wrapping",
+        ]
     }
 }
 

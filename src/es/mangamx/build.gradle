@@ -3,10 +3,11 @@ apply plugin: 'kotlin-android'
 apply plugin: 'kotlinx-serialization'
 
 ext {
-    extName = 'MangaMx'
+    extName = 'MangaOni'
     pkgNameSuffix = 'es.mangamx'
-    extClass = '.MangaMx'
-    extVersionCode = 12
+    extClass = '.MangaOni'
+    extVersionCode = 15
+    isNsfw = true
 }
 
 apply from: "$rootDir/common.gradle"

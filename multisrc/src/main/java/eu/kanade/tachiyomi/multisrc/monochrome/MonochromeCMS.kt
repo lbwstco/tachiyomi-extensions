@@ -8,7 +8,6 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
@@ -16,11 +15,10 @@ import okhttp3.Response
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
 
-@ExperimentalSerializationApi
 open class MonochromeCMS(
     override val name: String,
     override val baseUrl: String,
-    override val lang: String
+    override val lang: String,
 ) : HttpSource() {
     override val supportsLatest = false
 
@@ -47,19 +45,16 @@ open class MonochromeCMS(
     override fun fetchSearchManga(
         page: Int,
         query: String,
-        filters: FilterList
+        filters: FilterList,
     ): Observable<MangasPage> {
-        if (!query.startsWith(UUID_QUERY))
+        if (!query.startsWith(UUID_QUERY)) {
             return super.fetchSearchManga(page, query, filters)
+        }
         val req = GET("$apiUrl/manga/${query.substringAfter(UUID_QUERY)}")
         return client.newCall(req).asObservableSuccess().map {
             MangasPage(listOf(mangaFromAPI(it.decode())), false)
         }
     }
-
-    // Request the actual manga URL for the webview
-    override fun mangaDetailsRequest(manga: SManga) =
-        GET("$baseUrl/manga/${manga.url}", headers)
 
     override fun fetchMangaDetails(manga: SManga) =
         Observable.just(manga.apply { initialized = true })!!
@@ -88,6 +83,11 @@ open class MonochromeCMS(
         return Observable.just(pages)
     }
 
+    override fun getMangaUrl(manga: SManga) = "$baseUrl/manga/${manga.url}"
+
+    override fun getChapterUrl(chapter: SChapter) =
+        "$baseUrl/chapters/${chapter.url.subSequence(37, 73)}"
+
     private fun mangaFromAPI(manga: Manga) =
         SManga.create().apply {
             url = manga.id
@@ -104,12 +104,15 @@ open class MonochromeCMS(
         }
 
     private inline fun <reified T> Response.decode() =
-        json.decodeFromString<T>(body!!.string())
+        json.decodeFromString<T>(body.string())
 
     override fun popularMangaRequest(page: Int) =
         throw UnsupportedOperationException("Not used!")
 
     override fun latestUpdatesRequest(page: Int) =
+        throw UnsupportedOperationException("Not used!")
+
+    override fun mangaDetailsRequest(manga: SManga) =
         throw UnsupportedOperationException("Not used!")
 
     override fun popularMangaParse(response: Response) =

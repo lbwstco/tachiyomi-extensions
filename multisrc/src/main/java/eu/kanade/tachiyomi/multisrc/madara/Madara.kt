@@ -1,8 +1,18 @@
 package eu.kanade.tachiyomi.multisrc.madara
 
+import android.app.Application
+import android.content.SharedPreferences
+import android.util.Base64
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.lib.cryptoaes.CryptoAES
+import eu.kanade.tachiyomi.lib.randomua.addRandomUAPreferenceToScreen
+import eu.kanade.tachiyomi.lib.randomua.getPrefCustomUA
+import eu.kanade.tachiyomi.lib.randomua.getPrefUAType
+import eu.kanade.tachiyomi.lib.randomua.setRandomUserAgent
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.asObservable
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -12,11 +22,11 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.CacheControl
 import okhttp3.FormBody
-import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,42 +34,95 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
 import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.TimeUnit
-import kotlin.math.absoluteValue
-import kotlin.random.Random
 
 abstract class Madara(
     override val name: String,
     override val baseUrl: String,
     final override val lang: String,
-    private val dateFormat: SimpleDateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.US)
-) : ParsedHttpSource() {
+    private val dateFormat: SimpleDateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale.US),
+) : ParsedHttpSource(), ConfigurableSource {
+
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
 
     override val supportsLatest = true
 
-    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    override val client: OkHttpClient by lazy {
+        network.cloudflareClient.newBuilder()
+            .setRandomUserAgent(
+                preferences.getPrefUAType(),
+                preferences.getPrefCustomUA(),
+            )
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
 
-    // helps with cloudflare for some sources, makes it worse for others; override with empty string if the latter is true
-    protected open val userAgentRandomizer = " ${Random.nextInt().absoluteValue}"
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
 
     protected open val json: Json by injectLazy()
 
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:77.0) Gecko/20100101 Firefox/78.0$userAgentRandomizer")
-        .add("Referer", baseUrl)
+    /**
+     * If enabled, will attempt to remove non-manga items in popular and latest.
+     * The filter will not be used in search as the theme doesn't set the CSS class.
+     * Can be disabled if the source incorrectly sets the entry types.
+     */
+    protected open val filterNonMangaItems = true
+
+    /**
+     * The CSS selector used to filter manga items in popular and latest
+     * if `filterNonMangaItems` is set to `true`. Can be override if needed.
+     * If the flag is set to `false`, it will be empty by default.
+     */
+    protected open val mangaEntrySelector: String by lazy {
+        if (filterNonMangaItems) ".manga" else ""
+    }
+
+    /**
+     * Automatically fetched genres from the source to be used in the filters.
+     */
+    private var genresList: List<Genre> = emptyList()
+
+    /**
+     * Inner variable to control the genre fetching failed state.
+     */
+    private var fetchGenresFailed: Boolean = false
+
+    /**
+     * Inner variable to control how much tries the genres request was called.
+     */
+    private var fetchGenresAttempts: Int = 0
+
+    /**
+     * Disable it if you don't want the genres to be fetched.
+     */
+    protected open val fetchGenres: Boolean = true
+
+    /**
+     * The path used in the URL for the manga pages. Can be
+     * changed if needed as some sites modify it to other words.
+     */
+    protected open val mangaSubString = "manga"
 
     // Popular Manga
 
+    override fun popularMangaParse(response: Response): MangasPage {
+        runCatching { fetchGenres() }
+        return super.popularMangaParse(response)
+    }
+
     // exclude/filter bilibili manga from list
-    override fun popularMangaSelector() = "div.page-item-detail.manga:not(:has(a[href*='bilibilicomics.com']))"
+    override fun popularMangaSelector() = "div.page-item-detail:not(:has(a[href*='bilibilicomics.com']))$mangaEntrySelector"
 
     open val popularMangaUrlSelector = "div.post-title a"
 
@@ -80,28 +143,15 @@ abstract class Madara(
         return manga
     }
 
-    open fun formBuilder(page: Int, popular: Boolean) = FormBody.Builder().apply {
-        add("action", "madara_load_more")
-        add("page", (page - 1).toString())
-        add("template", "madara-core/content/content-archive")
-        add("vars[orderby]", "meta_value_num")
-        add("vars[paged]", "1")
-        add("vars[posts_per_page]", "20")
-        add("vars[post_type]", "wp-manga")
-        add("vars[post_status]", "publish")
-        add("vars[meta_key]", if (popular) "_wp_manga_views" else "_latest_update")
-        add("vars[order]", "desc")
-        add("vars[sidebar]", if (popular) "full" else "right")
-        add("vars[manga_archives_item_layout]", "big_thumbnail")
-    }
-
-    open val formHeaders: Headers by lazy { headersBuilder().build() }
-
     override fun popularMangaRequest(page: Int): Request {
-        return POST("$baseUrl/wp-admin/admin-ajax.php", formHeaders, formBuilder(page, true).build(), CacheControl.FORCE_NETWORK)
+        return GET(
+            url = "$baseUrl/$mangaSubString/${searchPage(page)}?m_orderby=views",
+            headers = headers,
+            cache = CacheControl.FORCE_NETWORK,
+        )
     }
 
-    override fun popularMangaNextPageSelector(): String? = "body:not(:has(.no-posts))"
+    override fun popularMangaNextPageSelector(): String? = searchMangaNextPageSelector()
 
     // Latest Updates
 
@@ -113,7 +163,11 @@ abstract class Madara(
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
-        return POST("$baseUrl/wp-admin/admin-ajax.php", formHeaders, formBuilder(page, false).build(), CacheControl.FORCE_NETWORK)
+        return GET(
+            url = "$baseUrl/$mangaSubString/${searchPage(page)}?m_orderby=latest",
+            headers = headers,
+            cache = CacheControl.FORCE_NETWORK,
+        )
     }
 
     override fun latestUpdatesNextPageSelector(): String? = popularMangaNextPageSelector()
@@ -124,15 +178,7 @@ abstract class Madara(
         return MangasPage(mangas, mp.hasNextPage)
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        if (genresList == null)
-            genresList = parseGenres(client.newCall(searchMangaRequest(1, "genre", getFilterList())).execute().asJsoup())
-        return super.popularMangaParse(response)
-    }
-
     // Search Manga
-
-    open val mangaSubString = "manga"
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         if (query.startsWith(URL_SEARCH_PREFIX)) {
@@ -142,31 +188,22 @@ abstract class Madara(
                     MangasPage(listOf(mangaDetailsParse(response.asJsoup()).apply { url = "/$mangaSubString/${query.substringAfter(URL_SEARCH_PREFIX)}/" }), false)
                 }
         }
+
         return client.newCall(searchMangaRequest(page, query, filters))
             .asObservable().doOnNext { response ->
                 if (!response.isSuccessful) {
                     response.close()
                     // Error message for exceeding last page
-                    if (response.code == 404)
+                    if (response.code == 404) {
                         error("Already on the Last Page!")
-                    else throw Exception("HTTP error ${response.code}")
+                    } else {
+                        throw Exception("HTTP error ${response.code}")
+                    }
                 }
             }
             .map { response ->
                 searchMangaParse(response)
             }
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (genresList == null)
-            genresList = parseGenres(response.asJsoup(response.peekBody(Long.MAX_VALUE).string()))
-        return super.searchMangaParse(response)
-    }
-
-    private fun parseGenres(document: Document): List<Genre>? {
-        return document.selectFirst("div.checkbox-group")?.select("div.checkbox")?.map { li ->
-            Genre(li.selectFirst("label").text(), li.selectFirst("input[type=checkbox]").`val`())
-        }
     }
 
     protected open fun searchPage(page: Int): String = "page/$page/"
@@ -217,6 +254,7 @@ abstract class Madara(
                             if (list.isNotEmpty()) { list.forEach { genre -> url.addQueryParameter("genre[]", genre.id) } }
                         }
                 }
+                else -> {}
             }
         }
         return GET(url.toString(), headers)
@@ -248,7 +286,10 @@ abstract class Madara(
     }
 
     protected val statusFilterOptionsValues: Array<String> = arrayOf(
-        "end", "on-going", "canceled", "on-hold"
+        "end",
+        "on-going",
+        "canceled",
+        "on-hold",
     )
 
     protected open val orderByFilterTitle: String = when (lang) {
@@ -258,17 +299,33 @@ abstract class Madara(
 
     protected open val orderByFilterOptions: Array<String> = when (lang) {
         "pt-BR" -> arrayOf(
-            "<selecione>", "Recentes", "A-Z", "Avaliação",
-            "Tendência", "Visualizações", "Novos"
+            "Relevância",
+            "Recentes",
+            "A-Z",
+            "Avaliação",
+            "Tendência",
+            "Visualizações",
+            "Novos",
         )
         else -> arrayOf(
-            "<select>", "Latest", "A-Z", "Rating",
-            "Trending", "Most Views", "New"
+            "Relevance",
+            "Latest",
+            "A-Z",
+            "Rating",
+            "Trending",
+            "Most Views",
+            "New",
         )
     }
 
     protected val orderByFilterOptionsValues: Array<String> = arrayOf(
-        "", "latest", "alphabet", "rating", "trending", "views", "new-manga"
+        "",
+        "latest",
+        "alphabet",
+        "rating",
+        "trending",
+        "views",
+        "new-manga",
     )
 
     protected open val genreConditionFilterTitle: String = when (lang) {
@@ -292,7 +349,7 @@ abstract class Madara(
     }
 
     protected open val genreFilterHeader: String = when (lang) {
-        "pt-BR" -> "O filtro de gêneros pode não funcionar em algumas fontes"
+        "pt-BR" -> "O filtro de gêneros pode não funcionar"
         else -> "Genres filter may not work for all sources"
     }
 
@@ -301,9 +358,9 @@ abstract class Madara(
         else -> "Genres"
     }
 
-    protected open val genreFilterResetWarning: String = when (lang) {
-        "pt-BR" -> "Aperte redefinir para tentar carregar os gêneros"
-        else -> "Press reset to attempt to fetch genres"
+    protected open val genresMissingWarning: String = when (lang) {
+        "pt-BR" -> "Aperte 'Redefinir' para tentar mostrar os gêneros"
+        else -> "Press 'Reset' to attempt to show the genres"
     }
 
     protected class AuthorFilter(title: String) : Filter.Text(title)
@@ -312,54 +369,68 @@ abstract class Madara(
     protected class StatusFilter(title: String, status: List<Tag>) :
         Filter.Group<Tag>(title, status)
 
-    protected class OrderByFilter(title: String, options: List<Pair<String, String>>) :
-        UriPartFilter(title, options.toTypedArray())
+    protected class OrderByFilter(title: String, options: List<Pair<String, String>>, state: Int = 0) :
+        UriPartFilter(title, options.toTypedArray(), state)
 
     protected class GenreConditionFilter(title: String, options: Array<String>) : UriPartFilter(
         title,
-        options.zip(arrayOf("", "1")).toTypedArray()
+        options.zip(arrayOf("", "1")).toTypedArray(),
     )
 
     protected class AdultContentFilter(title: String, options: Array<String>) : UriPartFilter(
         title,
-        options.zip(arrayOf("", "0", "1")).toTypedArray()
+        options.zip(arrayOf("", "0", "1")).toTypedArray(),
     )
 
     protected class GenreList(title: String, genres: List<Genre>) : Filter.Group<Genre>(title, genres)
     class Genre(name: String, val id: String = name) : Filter.CheckBox(name)
 
-    private var genresList: List<Genre>? = null
+    override fun getFilterList(): FilterList {
+        val filters = mutableListOf(
+            AuthorFilter(authorFilterTitle),
+            ArtistFilter(artistFilterTitle),
+            YearFilter(yearFilterTitle),
+            StatusFilter(statusFilterTitle, getStatusList()),
+            OrderByFilter(
+                title = orderByFilterTitle,
+                options = orderByFilterOptions.zip(orderByFilterOptionsValues),
+                state = 0,
+            ),
+            AdultContentFilter(adultContentFilterTitle, adultContentFilterOptions),
+        )
 
-    protected open fun getGenreList(): List<Genre> {
-        // Filters are fetched immediately once an extension loads
-        // We're only able to get filters after a loading the manga directory, and resetting
-        // the filters is the only thing that seems to reinflate the view
-        return genresList ?: listOf(Genre(genreFilterResetWarning, ""))
+        if (genresList.isNotEmpty()) {
+            filters += listOf(
+                Filter.Separator(),
+                Filter.Header(genreFilterHeader),
+                GenreConditionFilter(genreConditionFilterTitle, genreConditionFilterOptions),
+                GenreList(genreFilterTitle, genresList),
+            )
+        } else if (fetchGenres) {
+            filters += listOf(
+                Filter.Separator(),
+                Filter.Header(genresMissingWarning),
+            )
+        }
+
+        return FilterList(filters)
     }
-
-    override fun getFilterList() = FilterList(
-        AuthorFilter(authorFilterTitle),
-        ArtistFilter(artistFilterTitle),
-        YearFilter(yearFilterTitle),
-        StatusFilter(statusFilterTitle, getStatusList()),
-        OrderByFilter(orderByFilterTitle, orderByFilterOptions.zip(orderByFilterOptionsValues)),
-        AdultContentFilter(adultContentFilterTitle, adultContentFilterOptions),
-        Filter.Separator(),
-        Filter.Header(genreFilterHeader),
-        GenreConditionFilter(genreConditionFilterTitle, genreConditionFilterOptions),
-        GenreList(genreFilterTitle, getGenreList())
-    )
 
     protected fun getStatusList() = statusFilterOptionsValues
         .zip(statusFilterOptions)
         .map { Tag(it.first, it.second) }
 
-    open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>) :
-        Filter.Select<String>(displayName, vals.map { it.first }.toTypedArray()) {
+    open class UriPartFilter(displayName: String, private val vals: Array<Pair<String, String>>, state: Int = 0) :
+        Filter.Select<String>(displayName, vals.map { it.first }.toTypedArray(), state) {
         fun toUriPart() = vals[state].second
     }
 
     open class Tag(val id: String, name: String) : Filter.CheckBox(name)
+
+    override fun searchMangaParse(response: Response): MangasPage {
+        runCatching { fetchGenres() }
+        return super.searchMangaParse(response)
+    }
 
     override fun searchMangaSelector() = "div.c-tabs-item__content"
 
@@ -384,13 +455,36 @@ abstract class Madara(
     // Manga Details Parse
 
     protected val completedStatusList: Array<String> = arrayOf(
-        "Completed", "Completo", "Concluído", "Concluido", "Terminé", "Hoàn Thành", "مكتملة"
+        "Completed",
+        "Completo",
+        "Completado",
+        "Concluído",
+        "Concluido",
+        "Finalizado",
+        "Achevé",
+        "Terminé",
+        "Hoàn Thành",
+        "مكتملة",
+        "مكتمل",
+        "已完结",
     )
 
     protected val ongoingStatusList: Array<String> = arrayOf(
-        "OnGoing", "Продолжается", "Updating", "Em Lançamento", "Em andamento", "Em Andamento",
-        "En cours", "Ativo", "Lançando", "Đang Tiến Hành", "Devam Ediyor", "Devam ediyor",
-        "In Corso", "In Arrivo", "مستمرة"
+        "OnGoing", "Продолжается", "Updating", "Em Lançamento", "Em lançamento", "Em andamento",
+        "Em Andamento", "En cours", "En Cours", "En cours de publication", "Ativo", "Lançando", "Đang Tiến Hành", "Devam Ediyor",
+        "Devam ediyor", "In Corso", "In Arrivo", "مستمرة", "مستمر", "En Curso", "En curso", "Emision",
+        "Curso", "En marcha", "Publicandose", "En emision", "连载中", "Em Lançamento",
+    )
+
+    protected val hiatusStatusList: Array<String> = arrayOf(
+        "On Hold",
+        "Pausado",
+        "En espera",
+    )
+
+    protected val canceledStatusList: Array<String> = arrayOf(
+        "Canceled",
+        "Cancelado",
     )
 
     override fun mangaDetailsParse(document: Document): SManga {
@@ -423,22 +517,35 @@ abstract class Madara(
             }
             select(mangaDetailsSelectorStatus).last()?.let {
                 manga.status = when (it.text()) {
-                    // I don't know what's the corresponding for COMPLETED and LICENSED
-                    // There's no support for "Canceled" or "On Hold"
                     in completedStatusList -> SManga.COMPLETED
                     in ongoingStatusList -> SManga.ONGOING
+                    in hiatusStatusList -> SManga.ON_HIATUS
+                    in canceledStatusList -> SManga.CANCELLED
                     else -> SManga.UNKNOWN
                 }
             }
             val genres = select(mangaDetailsSelectorGenre)
-                .map { element -> element.text().toLowerCase(Locale.ROOT) }
+                .map { element -> element.text().lowercase(Locale.ROOT) }
                 .toMutableSet()
 
             // add tag(s) to genre
+            val mangaTitle = try {
+                manga.title
+            } catch (_: UninitializedPropertyAccessException) {
+                "not initialized"
+            }
+
             if (mangaDetailsSelectorTag.isNotEmpty()) {
                 select(mangaDetailsSelectorTag).forEach { element ->
-                    if (genres.contains(element.text()).not()) {
-                        genres.add(element.text().toLowerCase(Locale.ROOT))
+                    if (genres.contains(element.text()).not() &&
+                        element.text().length <= 25 &&
+                        element.text().contains("read", true).not() &&
+                        element.text().contains(name, true).not() &&
+                        element.text().contains(name.replace(" ", ""), true).not() &&
+                        element.text().contains(mangaTitle, true).not() &&
+                        element.text().contains(altName, true).not()
+                    ) {
+                        genres.add(element.text().lowercase(Locale.ROOT))
                     }
                 }
             }
@@ -446,11 +553,21 @@ abstract class Madara(
             // add manga/manhwa/manhua thinggy to genre
             document.select(seriesTypeSelector).firstOrNull()?.ownText()?.let {
                 if (it.isEmpty().not() && it.notUpdating() && it != "-" && genres.contains(it).not()) {
-                    genres.add(it.toLowerCase(Locale.ROOT))
+                    genres.add(it.lowercase(Locale.ROOT))
                 }
             }
 
-            manga.genre = genres.toList().joinToString(", ") { it.capitalize(Locale.ROOT) }
+            manga.genre = genres.toList().joinToString(", ") { genre ->
+                genre.replaceFirstChar {
+                    if (it.isLowerCase()) {
+                        it.titlecase(
+                            Locale.ROOT,
+                        )
+                    } else {
+                        it.toString()
+                    }
+                }
+            }
 
             // add alternative name to manga description
             document.select(altNameSelector).firstOrNull()?.ownText()?.let {
@@ -484,7 +601,7 @@ abstract class Madara(
     }
     open val updatingRegex = "Updating|Atualizando".toRegex(RegexOption.IGNORE_CASE)
 
-    public fun String.notUpdating(): Boolean {
+    fun String.notUpdating(): Boolean {
         return this.contains(updatingRegex).not()
     }
 
@@ -520,7 +637,7 @@ abstract class Madara(
         val xhrHeaders = headersBuilder()
             .add("Content-Length", form.contentLength().toString())
             .add("Content-Type", form.contentType().toString())
-            .add("Referer", baseUrl)
+            .add("Referer", "$baseUrl/")
             .add("X-Requested-With", "XMLHttpRequest")
             .build()
 
@@ -529,7 +646,7 @@ abstract class Madara(
 
     protected open fun xhrChaptersRequest(mangaUrl: String): Request {
         val xhrHeaders = headersBuilder()
-            .add("Referer", baseUrl)
+            .add("Referer", "$baseUrl/")
             .add("X-Requested-With", "XMLHttpRequest")
             .build()
 
@@ -546,8 +663,11 @@ abstract class Madara(
             val mangaUrl = document.location().removeSuffix("/")
             val mangaId = chaptersWrapper.attr("data-id")
 
-            var xhrRequest = if (useNewChapterEndpoint || oldChapterEndpointDisabled)
-                xhrChaptersRequest(mangaUrl) else oldXhrChaptersRequest(mangaId)
+            var xhrRequest = if (useNewChapterEndpoint || oldChapterEndpointDisabled) {
+                xhrChaptersRequest(mangaUrl)
+            } else {
+                oldXhrChaptersRequest(mangaId)
+            }
             var xhrResponse = client.newCall(xhrRequest).execute()
 
             // Newer Madara versions throws HTTP 400 when using the old endpoint.
@@ -571,8 +691,11 @@ abstract class Madara(
 
     override fun chapterListSelector() = "li.wp-manga-chapter"
 
+    protected open fun chapterDateSelector() = "span.chapter-release-date"
+
     open val chapterUrlSelector = "a"
 
+    // can cause some issue for some site. blocked by cloudflare when opening the chapter pages
     open val chapterUrlSuffix = "?style=list"
 
     override fun chapterFromElement(element: Element): SChapter {
@@ -589,7 +712,7 @@ abstract class Madara(
             // Added "title" alternative
             chapter.date_upload = select("img:not(.thumb)").firstOrNull()?.attr("alt")?.let { parseRelativeDate(it) }
                 ?: select("span a").firstOrNull()?.attr("title")?.let { parseRelativeDate(it) }
-                ?: parseChapterDate(select("span.chapter-release-date").firstOrNull()?.text())
+                ?: parseChapterDate(select(chapterDateSelector()).firstOrNull()?.text())
         }
 
         return chapter
@@ -637,6 +760,9 @@ abstract class Madara(
             WordSet("ago", "atrás", "önce", "قبل").endsWith(date) -> {
                 parseRelativeDate(date)
             }
+            WordSet("hace").startsWith(date) -> {
+                parseRelativeDate(date)
+            }
             date.contains(Regex("""\d(st|nd|rd|th)""")) -> {
                 // Clean date (e.g. 5th December 2019 to 5 December 2019) before parsing it
                 date.split(" ").map {
@@ -659,13 +785,13 @@ abstract class Madara(
         val cal = Calendar.getInstance()
 
         return when {
-            WordSet("hari", "gün", "jour", "día", "dia", "day", "วัน", "ngày", "giorni", "أيام").anyWordIn(date) -> cal.apply { add(Calendar.DAY_OF_MONTH, -number) }.timeInMillis
-            WordSet("jam", "saat", "heure", "hora", "hour", "ชั่วโมง", "giờ", "ore", "ساعة").anyWordIn(date) -> cal.apply { add(Calendar.HOUR, -number) }.timeInMillis
+            WordSet("hari", "gün", "jour", "día", "dia", "day", "วัน", "ngày", "giorni", "أيام", "天").anyWordIn(date) -> cal.apply { add(Calendar.DAY_OF_MONTH, -number) }.timeInMillis
+            WordSet("jam", "saat", "heure", "hora", "hour", "ชั่วโมง", "giờ", "ore", "ساعة", "小时").anyWordIn(date) -> cal.apply { add(Calendar.HOUR, -number) }.timeInMillis
             WordSet("menit", "dakika", "min", "minute", "minuto", "นาที", "دقائق").anyWordIn(date) -> cal.apply { add(Calendar.MINUTE, -number) }.timeInMillis
             WordSet("detik", "segundo", "second", "วินาที").anyWordIn(date) -> cal.apply { add(Calendar.SECOND, -number) }.timeInMillis
-            WordSet("week").anyWordIn(date) -> cal.apply { add(Calendar.DAY_OF_MONTH, -number * 7) }.timeInMillis
-            WordSet("month").anyWordIn(date) -> cal.apply { add(Calendar.MONTH, -number) }.timeInMillis
-            WordSet("year").anyWordIn(date) -> cal.apply { add(Calendar.YEAR, -number) }.timeInMillis
+            WordSet("week", "semana").anyWordIn(date) -> cal.apply { add(Calendar.DAY_OF_MONTH, -number * 7) }.timeInMillis
+            WordSet("month", "mes").anyWordIn(date) -> cal.apply { add(Calendar.MONTH, -number) }.timeInMillis
+            WordSet("year", "año").anyWordIn(date) -> cal.apply { add(Calendar.YEAR, -number) }.timeInMillis
             else -> 0
         }
     }
@@ -679,17 +805,37 @@ abstract class Madara(
 
     open val pageListParseSelector = "div.page-break, li.blocks-gallery-item, .reading-content .text-left:not(:has(.blocks-gallery-item)) img"
 
+    open val chapterProtectorSelector = "#chapter-protector-data"
+
     override fun pageListParse(document: Document): List<Page> {
         countViews(document)
 
-        return document.select(pageListParseSelector).mapIndexed { index, element ->
-            Page(
-                index,
-                document.location(),
-                element.select("img").first()?.let {
-                    it.absUrl(if (it.hasAttr("data-src")) "data-src" else "src")
-                }
-            )
+        val chapterProtector = document.selectFirst(chapterProtectorSelector)
+            ?: return document.select(pageListParseSelector).mapIndexed { index, element ->
+                val imageUrl = element.selectFirst("img")?.let { imageFromElement(it) }
+                Page(index, document.location(), imageUrl)
+            }
+        val chapterProtectorHtml = chapterProtector.html()
+        val password = chapterProtectorHtml
+            .substringAfter("wpmangaprotectornonce='")
+            .substringBefore("';")
+        val chapterData = json.parseToJsonElement(
+            chapterProtectorHtml
+                .substringAfter("chapter_data='")
+                .substringBefore("';")
+                .replace("\\/", "/"),
+        ).jsonObject
+
+        val unsaltedCiphertext = Base64.decode(chapterData["ct"]!!.jsonPrimitive.content, Base64.DEFAULT)
+        val salt = chapterData["s"]!!.jsonPrimitive.content.decodeHex()
+        val ciphertext = SALTED + salt + unsaltedCiphertext
+
+        val rawImgArray = CryptoAES.decrypt(Base64.encodeToString(ciphertext, Base64.DEFAULT), password)
+        val imgArrayString = json.parseToJsonElement(rawImgArray).jsonPrimitive.content
+        val imgArray = json.parseToJsonElement(imgArrayString).jsonArray
+
+        return imgArray.mapIndexed { idx, it ->
+            Page(idx, document.location(), it.jsonPrimitive.content)
         }
     }
 
@@ -755,8 +901,62 @@ abstract class Madara(
         runCatching { client.newCall(request).execute().close() }
     }
 
+    /**
+     * Fetch the genres from the source to be used in the filters.
+     */
+    protected open fun fetchGenres() {
+        if (fetchGenres && fetchGenresAttempts <= 3 && (genresList.isEmpty() || fetchGenresFailed)) {
+            val genres = runCatching {
+                client.newCall(genresRequest()).execute()
+                    .use { parseGenres(it.asJsoup()) }
+            }
+
+            fetchGenresFailed = genres.isFailure
+            genresList = genres.getOrNull().orEmpty()
+            fetchGenresAttempts++
+        }
+    }
+
+    /**
+     * The request to the search page (or another one) that have the genres list.
+     */
+    protected open fun genresRequest(): Request {
+        return GET("$baseUrl/?s=genre&post_type=wp-manga", headers)
+    }
+
+    /**
+     * Get the genres from the search page document.
+     *
+     * @param document The search page document
+     */
+    protected open fun parseGenres(document: Document): List<Genre> {
+        return document.selectFirst("div.checkbox-group")
+            ?.select("div.checkbox")
+            .orEmpty()
+            .map { li ->
+                Genre(
+                    li.selectFirst("label")!!.text(),
+                    li.selectFirst("input[type=checkbox]")!!.`val`(),
+                )
+            }
+    }
+
+    // https://stackoverflow.com/a/66614516
+    private fun String.decodeHex(): ByteArray {
+        check(length % 2 == 0) { "Must have an even length" }
+
+        return chunked(2)
+            .map { it.toInt(16).toByte() }
+            .toByteArray()
+    }
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        addRandomUAPreferenceToScreen(screen)
+    }
+
     companion object {
-        const val URL_SEARCH_PREFIX = "SLUG:"
+        const val URL_SEARCH_PREFIX = "slug:"
+        val SALTED = "Salted__".toByteArray(Charsets.UTF_8)
     }
 }
 

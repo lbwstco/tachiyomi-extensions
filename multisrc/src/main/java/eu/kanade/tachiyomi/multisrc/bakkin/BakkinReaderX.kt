@@ -4,7 +4,7 @@ import android.app.Application
 import android.os.Build
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.BuildConfig
+import eu.kanade.tachiyomi.AppInfo
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -25,13 +25,13 @@ import uy.kohesive.injekt.api.get
 abstract class BakkinReaderX(
     override val name: String,
     override val baseUrl: String,
-    override val lang: String
+    override val lang: String,
 ) : ConfigurableSource, HttpSource() {
     override val supportsLatest = false
 
     private val userAgent = "Mozilla/5.0 (" +
         "Android ${Build.VERSION.RELEASE}; Mobile) " +
-        "Tachiyomi/${BuildConfig.VERSION_NAME}"
+        "Tachiyomi/${AppInfo.getVersionName()}"
 
     protected val preferences by lazy {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)!!
@@ -49,7 +49,7 @@ abstract class BakkinReaderX(
             rx.Observable.just(block(seriesCache))!!
         } else {
             client.newCall(GET(mainUrl, headers)).asObservableSuccess().map {
-                seriesCache = json.parseToJsonElement(it.body!!.string())
+                seriesCache = json.parseToJsonElement(it.body.string())
                     .jsonObject.values.map(json::decodeFromJsonElement)
                 block(seriesCache)
             }!!
@@ -60,10 +60,6 @@ abstract class BakkinReaderX(
 
     override fun headersBuilder() =
         Headers.Builder().add("User-Agent", userAgent)
-
-    // Request the actual manga URL for the webview
-    override fun mangaDetailsRequest(manga: SManga) =
-        GET("$baseUrl#m=${manga.url}", headers)
 
     override fun fetchPopularManga(page: Int) =
         fetchSearchManga(page, "", FilterList())
@@ -99,11 +95,11 @@ abstract class BakkinReaderX(
 
     override fun fetchChapterList(manga: SManga) =
         observableSeries { series ->
-            series.first { it.dir == manga.url }.mapIndexed { idx, chapter ->
+            series.first { it.dir == manga.url }.map { chapter ->
                 SChapter.create().apply {
                     url = chapter.dir
                     name = chapter.toString()
-                    chapter_number = idx.toFloat()
+                    chapter_number = chapter.number
                     date_upload = 0L
                 }
             }.reversed()
@@ -114,6 +110,13 @@ abstract class BakkinReaderX(
             series.flatten().first { it.dir == chapter.url }
                 .mapIndexed { idx, page -> Page(idx, "", baseUrl + page) }
         }
+
+    override fun getMangaUrl(manga: SManga) = "$baseUrl#m=${manga.url}"
+
+    override fun getChapterUrl(chapter: SChapter): String {
+        val (m, v, c) = chapter.url.split('/')
+        return "$baseUrl#m=$m&v=$v&c=$c"
+    }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -137,6 +140,9 @@ abstract class BakkinReaderX(
         throw UnsupportedOperationException("Not used!")
 
     override fun latestUpdatesRequest(page: Int) =
+        throw UnsupportedOperationException("Not used!")
+
+    override fun mangaDetailsRequest(manga: SManga) =
         throw UnsupportedOperationException("Not used!")
 
     override fun searchMangaParse(response: Response) =

@@ -9,7 +9,6 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -19,7 +18,6 @@ import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
 
-@ExperimentalSerializationApi
 class Pururin : HttpSource() {
     override val name = "Pururin"
 
@@ -71,14 +69,14 @@ class Pururin : HttpSource() {
                 whitelist,
                 blacklist,
                 find<TagModeFilter>().mode,
-                find<PagesGroup>().range
+                find<PagesGroup>().range,
             )
             POST(searchUrl, headers, body)
         }
 
     override fun searchMangaParse(response: Response): MangasPage {
         val results = json.decodeFromString<Results>(
-            response.jsonObject["results"]!!.jsonPrimitive.content
+            response.jsonObject["results"]!!.jsonPrimitive.content,
         )
         val mp = results.map {
             SManga.create().apply {
@@ -92,7 +90,7 @@ class Pururin : HttpSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         val gallery = json.decodeFromJsonElement<Gallery>(
-            response.jsonObject["gallery"]!!
+            response.jsonObject["gallery"]!!,
         )
         return SManga.create().apply {
             description = gallery.description
@@ -111,7 +109,7 @@ class Pururin : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val gallery = json.decodeFromJsonElement<Gallery>(
-            response.jsonObject["gallery"]!!
+            response.jsonObject["gallery"]!!,
         )
         val chapter = SChapter.create().apply {
             name = "Chapter"
@@ -126,7 +124,7 @@ class Pururin : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val pages = json.decodeFromJsonElement<Gallery>(
-            response.jsonObject["gallery"]!!
+            response.jsonObject["gallery"]!!,
         ).pages
         return pages.mapIndexed { idx, img ->
             Page(idx + 1, CDN_URL + img)
@@ -155,7 +153,7 @@ class Pururin : HttpSource() {
     )
 
     private inline val Response.jsonObject
-        get() = json.parseToJsonElement(body!!.string()).jsonObject
+        get() = json.parseToJsonElement(body.string()).jsonObject
 
     private inline val SManga.id get() = url.split('/')[2]
 

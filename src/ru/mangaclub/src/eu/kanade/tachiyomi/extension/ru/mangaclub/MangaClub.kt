@@ -18,14 +18,14 @@ import java.util.Locale
 
 class MangaClub : ParsedHttpSource() {
 
-    // Info
+    /** Info **/
     override val name: String = "MangaClub"
     override val baseUrl: String = "https://mangaclub.ru"
     override val lang: String = "ru"
     override val supportsLatest: Boolean = true
     override val client: OkHttpClient = network.cloudflareClient
 
-    // Popular
+    /** Popular **/
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/f/sort=rating/order=desc/page/$page/", headers)
     override fun popularMangaNextPageSelector(): String = "div.pagination-list i.icon-right-open"
     override fun popularMangaSelector(): String = "div.shortstory"
@@ -37,13 +37,13 @@ class MangaClub : ParsedHttpSource() {
         }
     }
 
-    // Latest
+    /** Latest **/
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/page/$page/", headers)
     override fun latestUpdatesNextPageSelector(): String = popularMangaNextPageSelector()
     override fun latestUpdatesSelector(): String = popularMangaSelector()
     override fun latestUpdatesFromElement(element: Element): SManga = popularMangaFromElement(element)
 
-    // Search
+    /** Search **/
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         var url = baseUrl
         if (query.isNotEmpty()) {
@@ -80,6 +80,7 @@ class MangaClub : ParsedHttpSource() {
                         val orderID = arrayOf("date", "editdate", "title", "comm_num", "news_read", "rating")[filter.state!!.index]
                         url += "/sort=$orderID/order=$orderState"
                     }
+                    else -> {}
                 }
             }
             url += "/page/$page"
@@ -90,25 +91,26 @@ class MangaClub : ParsedHttpSource() {
     override fun searchMangaSelector(): String = popularMangaSelector()
     override fun searchMangaFromElement(element: Element): SManga = popularMangaFromElement(element)
 
-    // Details
+    /** Details **/
     override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        val licensedStatus = document.select("div.fullstory").text().contains("Данное произведение лицензировано на территории РФ. Главы удалены.")
         thumbnail_url = document.select("div.image img").attr("abs:src")
         title = document.select("div.info strong").text().replace("\\'", "'").substringBefore("/").trim()
         author = document.select("div.info a[href*=author]").joinToString(", ") { it.text().trim() }
         artist = author
-        status = when (document.select("div.info a[href*=status_translation]").text().trim()) {
-            "Продолжается" -> if (licensedStatus) SManga.LICENSED else SManga.ONGOING
-            "Завершен" -> if (licensedStatus) SManga.LICENSED else SManga.COMPLETED
+        status = if (document.select("div.fullstory").text().contains("Данное произведение лицензировано на территории РФ. Главы удалены.")) SManga.LICENSED else when (document.select("div.info a[href*=status_translation]").text().trim()) {
+            "Продолжается" -> SManga.ONGOING
+            "Завершен" -> SManga.COMPLETED
+            "Заморожено/Заброшено" -> SManga.ON_HIATUS
             else -> SManga.UNKNOWN
         }
-        description = "Читайте описание через WebView"
+
+        description = document.select(".description").first()!!.text()
         genre = document.select("div.info a[href*=tags]").joinToString(", ") {
-            it.text().replaceFirst(it.text().first(), it.text().first().toUpperCase()).trim()
+            it.text().replaceFirstChar { it.uppercase() }.trim()
         }
     }
 
-    // Chapters
+    /** Chapters **/
     private val dateParse = SimpleDateFormat("dd.MM.yyyy", Locale.ROOT)
     override fun chapterListSelector(): String = "div.chapters div.chapter-item"
     override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
@@ -119,41 +121,41 @@ class MangaClub : ParsedHttpSource() {
         setUrlWithoutDomain(chapterLink.attr("abs:href"))
     }
 
-    // Pages
+    /** Pages **/
     override fun pageListParse(document: Document): List<Page> = mutableListOf<Page>().apply {
-        document.select("div.manga-lines-page a").forEach {
-            add(Page(it.attr("data-p").toInt(), "", "${baseUrl.replace("//", "//img.")}/${it.attr("data-i")}"))
+        document.select(".manga-lines-page a").forEach {
+            add(Page(it.attr("data-p").toInt(), "", it.attr("data-i")))
         }
     }
     override fun imageUrlParse(document: Document): String = ""
 
-    // Filters
+    /** Filters **/
     private class GenreList(genres: List<Genre>) : Filter.Group<Genre>("Жанры", genres)
     private class Genre(name: String, val id: String) : Filter.CheckBox(name)
     private class CategoryList(categories: List<Category>) : Filter.Group<Category>("Категория", categories)
     private class Category(name: String, val id: String) : Filter.CheckBox(name)
     private class Status : Filter.Select<String>(
         "Статус",
-        arrayOf("Не выбрано", "Завершен", "Продолжается", "Заморожено/Заброшено")
+        arrayOf("Не выбрано", "Завершен", "Продолжается", "Заморожено/Заброшено"),
     )
     private class OrderBy : Filter.Sort(
         "Сортировка",
         arrayOf("По дате добавления", "По дате обновления", "В алфавитном порядке", "По количеству комментариев", "По количеству просмотров", "По рейтингу"),
-        Selection(5, false)
+        Selection(5, false),
     )
 
     override fun getFilterList() = FilterList(
         GenreList(getGenreList()),
         Status(),
         CategoryList(getCategoryList()),
-        OrderBy()
+        OrderBy(),
     )
 
     private fun getCategoryList() = listOf(
         Category("Манга", "1"),
         Category("Манхва", "2"),
         Category("Маньхуа", "3"),
-        Category("Веб-манхва", "6")
+        Category("Веб-манхва", "6"),
     )
 
     private fun getGenreList() = listOf(
@@ -203,6 +205,6 @@ class MangaClub : ParsedHttpSource() {
         Genre("Ёнкома", "ёнкома"),
         Genre("Этти", "этти"),
         Genre("Юри", "юри"),
-        Genre("Яой", "яой")
+        Genre("Яой", "яой"),
     )
 }

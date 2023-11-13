@@ -4,6 +4,7 @@ import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.util.asJsoup
@@ -18,9 +19,11 @@ class InstaManhwa : Madara(
     "InstaManhwa",
     "https://www.instamanhwa.com",
     "en",
-    SimpleDateFormat("dd MMMM, yyyy", Locale.US)
+    SimpleDateFormat("dd MMMM, yyyy", Locale.US),
 ) {
+
     override val supportsLatest: Boolean = false
+    override val fetchGenres = false
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/latest?page=$page", headers)
 
@@ -28,6 +31,10 @@ class InstaManhwa : Madara(
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         return GET("$baseUrl/search?s=$query&page=$page", headers)
+    }
+
+    override fun pageListParse(document: Document): List<Page> {
+        return super.pageListParse(document).distinctBy { it.imageUrl }
     }
 
     override fun chapterListRequest(manga: SManga): Request {
@@ -56,9 +63,6 @@ class InstaManhwa : Madara(
             .build()
         return client.newCall(POST("$baseUrl/ajax", headers, body)).execute().asJsoup()
     }
-
-    // Not used
-    override fun getGenreList(): List<Genre> = emptyList()
 
     // Not used
     override fun getFilterList(): FilterList = FilterList()

@@ -3,10 +3,13 @@ package eu.kanade.tachiyomi.extension.all.lanraragi
 import android.app.Application
 import android.content.SharedPreferences
 import android.net.Uri
+import android.text.InputType
 import android.util.Base64
+import android.widget.Toast
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.UnmeteredSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -31,22 +34,21 @@ import rx.schedulers.Schedulers
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.IOException
+import java.security.MessageDigest
+import kotlin.math.max
 
-class LANraragi : ConfigurableSource, HttpSource() {
-    override val baseUrl: String
-        get() = preferences.getString("hostname", "http://127.0.0.1:3000")!!
+open class LANraragi(private val suffix: String = "") : ConfigurableSource, UnmeteredSource, HttpSource() {
+    override val baseUrl by lazy { getPrefBaseUrl() }
 
     override val lang = "all"
 
-    override val name = "LANraragi"
+    override val name by lazy { "LANraragi (${getPrefCustomLabel()})" }
 
     override val supportsLatest = true
 
-    private val apiKey: String
-        get() = preferences.getString("apiKey", "")!!
+    private val apiKey by lazy { getPrefAPIKey() }
 
-    private val latestNamespacePref: String
-        get() = preferences.getString("latestNamespacePref", DEFAULT_SORT_BY_NS)!!
+    private val latestNamespacePref by lazy { getPrefLatestNS() }
 
     private val json by lazy { Injekt.get<Json>() }
 
@@ -74,7 +76,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val archive = json.decodeFromString<Archive>(response.body!!.string())
+        val archive = json.decodeFromString<Archive>(response.body.string())
 
         return archiveToSManga(archive)
     }
@@ -87,11 +89,11 @@ class LANraragi : ConfigurableSource, HttpSource() {
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val archive = json.decodeFromString<Archive>(response.body!!.string())
+        val archive = json.decodeFromString<Archive>(response.body.string())
         val uri = getApiUriBuilder("/api/archives/${archive.arcid}/files")
+        val prefClearNew = preferences.getBoolean(NEW_ONLY_KEY, NEW_ONLY_DEFAULT)
 
-        // Replicate old behavior and unset "isnew" for the archive.
-        if (archive.isnew == "true") {
+        if (archive.isnew == "true" && prefClearNew) {
             val clearNew = Request.Builder()
                 .url("$baseUrl/api/archives/${archive.arcid}/isnew")
                 .headers(headers)
@@ -112,7 +114,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
                 getDateAdded(archive.tags).toLongOrNull()?.let {
                     date_upload = it
                 }
-            }
+            },
         )
     }
 
@@ -121,7 +123,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val archivePage = json.decodeFromString<ArchivePage>(response.body!!.string())
+        val archivePage = json.decodeFromString<ArchivePage>(response.body.string())
 
         return archivePage.pages.mapIndexed { index, url ->
             val uri = Uri.parse("${baseUrl}${url.trimStart('.')}")
@@ -141,7 +143,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
 
     override fun latestUpdatesRequest(page: Int): Request {
         val filters = mutableListOf<Filter<*>>()
-        val prefNewOnly = preferences.getBoolean("latestNewOnly", false)
+        val prefNewOnly = preferences.getBoolean(NEW_ONLY_KEY, NEW_ONLY_DEFAULT)
 
         if (prefNewOnly) filters.add(NewArchivesOnly(true))
 
@@ -181,7 +183,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
                 is DescendingOrder -> if (filter.state) uri.appendQueryParameter("order", "desc")
                 is SortByNamespace -> if (filter.state.isNotEmpty()) uri.appendQueryParameter("sortby", filter.state.trim())
                 is CategorySelect -> if (filter.state > 0) uri.appendQueryParameter("category", filter.toUriPart())
-                else -> Unit
+                else -> {}
             }
         }
 
@@ -195,12 +197,12 @@ class LANraragi : ConfigurableSource, HttpSource() {
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val jsonResult = json.decodeFromString<ArchiveSearchResult>(response.body!!.string())
+        val jsonResult = json.decodeFromString<ArchiveSearchResult>(response.body.string())
         val currentStart = getStart(response)
         val archives = arrayListOf<SManga>()
 
         lastResultCount = jsonResult.data.size
-        maxResultCount = if (lastResultCount >= maxResultCount) lastResultCount else maxResultCount
+        maxResultCount = max(lastResultCount, maxResultCount)
         lastRecordsFiltered = jsonResult.recordsFiltered
         totalRecords = jsonResult.recordsTotal
 
@@ -214,7 +216,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
                     title = "Random"
                     description = "Refresh for a random archive."
                     thumbnail_url = getThumbnailUri("tachiyomi") // noThumb
-                }
+                },
             )
         }
 
@@ -222,7 +224,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
             archives.add(archiveToSManga(it))
         }
 
-        return MangasPage(archives, currentStart + jsonResult.data.size < jsonResult.recordsFiltered)
+        return MangasPage(archives, currentStart + lastResultCount < lastRecordsFiltered)
     }
 
     private fun archiveToSManga(archive: Archive) = SManga.create().apply {
@@ -238,7 +240,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
 
     override fun headersBuilder() = Headers.Builder().apply {
         if (apiKey.isNotEmpty()) {
-            val apiKey64 = Base64.encodeToString(apiKey.toByteArray(), Base64.DEFAULT).trim()
+            val apiKey64 = Base64.encodeToString(apiKey.toByteArray(), Base64.NO_WRAP)
             add("Authorization", "Bearer $apiKey64")
         }
     }
@@ -257,100 +259,92 @@ class LANraragi : ConfigurableSource, HttpSource() {
         NewArchivesOnly(),
         UntaggedArchivesOnly(),
         StartingPage(startingPageStats()),
-        SortByNamespace()
+        SortByNamespace(),
     )
 
     private var categories = emptyList<Category>()
 
     // Preferences
+    override val id by lazy {
+        // Retain previous ID for first entry
+        val key = "lanraragi" + (if (suffix == "1") "" else "_$suffix") + "/all/$versionId"
+        val bytes = MessageDigest.getInstance("MD5").digest(key.toByteArray())
+        (0..7).map { bytes[it].toLong() and 0xff shl 8 * (7 - it) }.reduce(Long::or) and Long.MAX_VALUE
+    }
+
     private val preferences: SharedPreferences by lazy {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }
 
+    private fun getPrefBaseUrl(): String = preferences.getString(HOSTNAME_KEY, HOSTNAME_DEFAULT)!!
+    private fun getPrefAPIKey(): String = preferences.getString(APIKEY_KEY, "")!!
+    private fun getPrefLatestNS(): String = preferences.getString(SORT_BY_NS_KEY, SORT_BY_NS_DEFAULT)!!
+    private fun getPrefCustomLabel(): String = preferences.getString(CUSTOM_LABEL_KEY, suffix)!!.ifBlank { suffix }
+
     override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
-        val hostnamePref = androidx.preference.EditTextPreference(screen.context).apply {
-            key = "Hostname"
-            title = "Hostname"
-            text = baseUrl
-            summary = baseUrl
-            dialogTitle = "Hostname"
+        screen.addPreference(screen.editTextPreference(HOSTNAME_KEY, "Hostname", HOSTNAME_DEFAULT, baseUrl, refreshSummary = true))
+        screen.addPreference(screen.editTextPreference(APIKEY_KEY, "API Key", "", "Required if No-Fun Mode is enabled.", true))
+        screen.addPreference(screen.editTextPreference(CUSTOM_LABEL_KEY, "Custom Label", "", "Show the given label for the source instead of the default."))
+        screen.addPreference(screen.checkBoxPreference(CLEAR_NEW_KEY, "Clear New status", CLEAR_NEW_DEFAULT, "Clear an entry's New status when its details are viewed."))
+        screen.addPreference(screen.checkBoxPreference(NEW_ONLY_KEY, "Latest - New Only", NEW_ONLY_DEFAULT))
+        screen.addPreference(screen.editTextPreference(SORT_BY_NS_KEY, "Latest - Sort by Namespace", SORT_BY_NS_DEFAULT, "Sort by the given namespace for Latest, such as date_added."))
+    }
+
+    private fun androidx.preference.PreferenceScreen.checkBoxPreference(key: String, title: String, default: Boolean, summary: String = ""): androidx.preference.CheckBoxPreference {
+        return androidx.preference.CheckBoxPreference(context).apply {
+            this.key = key
+            this.title = title
+            this.summary = summary
+            setDefaultValue(default)
 
             setOnPreferenceChangeListener { _, newValue ->
-                var hostname = newValue as String
-                if (!hostname.startsWith("http://") && !hostname.startsWith("https://")) {
-                    hostname = "http://$hostname"
-                }
-
-                this.apply {
-                    text = hostname
-                    summary = hostname
-                }
-
-                preferences.edit().putString("hostname", hostname).commit()
+                preferences.edit().putBoolean(this.key, newValue as Boolean).commit()
             }
         }
+    }
 
-        val apiKeyPref = androidx.preference.EditTextPreference(screen.context).apply {
-            key = "API Key"
-            title = "API Key"
-            text = apiKey
-            summary = "Required if No-Fun Mode is enabled."
-            dialogTitle = "API Key"
+    private fun androidx.preference.PreferenceScreen.editTextPreference(key: String, title: String, default: String, summary: String, isPassword: Boolean = false, refreshSummary: Boolean = false): androidx.preference.EditTextPreference {
+        return androidx.preference.EditTextPreference(context).apply {
+            this.key = key
+            this.title = title
+            this.summary = summary
+            this.setDefaultValue(default)
+
+            if (isPassword) {
+                setOnBindEditTextListener {
+                    it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                }
+            }
 
             setOnPreferenceChangeListener { _, newValue ->
-                val apiKey = newValue as String
+                try {
+                    val newString = newValue.toString()
+                    val res = preferences.edit().putString(this.key, newString).commit()
 
-                this.apply {
-                    text = apiKey
-                    summary = "Required if No-Fun Mode is enabled."
+                    if (refreshSummary) {
+                        this.apply {
+                            this.summary = newValue as String
+                        }
+                    }
+
+                    Toast.makeText(context, "Restart Tachiyomi to apply new setting.", Toast.LENGTH_LONG).show()
+                    res
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    false
                 }
-
-                preferences.edit().putString("apiKey", newValue).commit()
             }
         }
-
-        val latestNewOnlyPref = androidx.preference.CheckBoxPreference(screen.context).apply {
-            key = "latestNewOnly"
-            title = "Latest - New Only"
-            setDefaultValue(true)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-                preferences.edit().putBoolean("latestNewOnly", checkValue).commit()
-            }
-        }
-
-        val latestNamespacePref = androidx.preference.EditTextPreference(screen.context).apply {
-            key = "latestNamespacePref"
-            title = "Latest - Sort by Namespace"
-            text = latestNamespacePref
-            summary = "Sort by the given namespace for Latest, such as date_added."
-            dialogTitle = "Latest - Sort by Namespace"
-            setDefaultValue(DEFAULT_SORT_BY_NS)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val latestNamespacePref = newValue as String
-
-                this.apply {
-                    text = latestNamespacePref
-                }
-
-                preferences.edit().putString("latestNamespacePref", newValue).commit()
-            }
-        }
-
-        screen.addPreference(hostnamePref)
-        screen.addPreference(apiKeyPref)
-        screen.addPreference(latestNewOnlyPref)
-        screen.addPreference(latestNamespacePref)
     }
 
     // Helper
     private fun getRandomID(query: String): String {
-        val searchRandom = client.newCall(GET("$baseUrl/api/search/random?$query", headers)).execute()
-        val data = json.parseToJsonElement(searchRandom.body!!.string()).jsonObject["data"]
+        val searchRandom = client.newCall(GET("$baseUrl/api/search/random?count=1&$query", headers)).execute()
+        val data = json.parseToJsonElement(searchRandom.body.string()).jsonObject["data"]
+        val archive = data!!.jsonArray.firstOrNull()?.jsonObject
 
-        return data!!.jsonArray.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: ""
+        // 0.8.2~0.8.7 = id, 0.8.8+ = arcid
+        return (archive?.get("arcid") ?: archive?.get("id"))?.jsonPrimitive?.content ?: ""
     }
 
     open class UriPartFilter(displayName: String, private val vals: Array<Pair<String?, String>>) :
@@ -367,12 +361,12 @@ class LANraragi : ConfigurableSource, HttpSource() {
             .subscribe(
                 {
                     categories = try {
-                        json.decodeFromString(it.body!!.string())
+                        json.decodeFromString(it.body.string())
                     } catch (e: Exception) {
                         emptyList()
                     }
                 },
-                {}
+                {},
             )
     }
 
@@ -393,7 +387,7 @@ class LANraragi : ConfigurableSource, HttpSource() {
                     .map {
                         val pinned = if (it.pinned == "1") pin else ""
                         Pair(it.id, "$pinned${it.name}")
-                    }
+                    },
             )
             .toTypedArray()
     }
@@ -464,6 +458,15 @@ class LANraragi : ConfigurableSource, HttpSource() {
     }
 
     companion object {
-        private const val DEFAULT_SORT_BY_NS = "date_added"
+        private const val HOSTNAME_DEFAULT = "http://127.0.0.1:3000"
+        private const val HOSTNAME_KEY = "hostname"
+        private const val APIKEY_KEY = "apiKey"
+        private const val CUSTOM_LABEL_KEY = "customLabel"
+        private const val NEW_ONLY_DEFAULT = true
+        private const val NEW_ONLY_KEY = "latestNewOnly"
+        private const val SORT_BY_NS_DEFAULT = "date_added"
+        private const val SORT_BY_NS_KEY = "latestNamespacePref"
+        private const val CLEAR_NEW_KEY = "clearNew"
+        private const val CLEAR_NEW_DEFAULT = true
     }
 }

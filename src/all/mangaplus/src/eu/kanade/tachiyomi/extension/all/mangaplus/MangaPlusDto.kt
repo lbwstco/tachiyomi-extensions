@@ -1,164 +1,319 @@
 package eu.kanade.tachiyomi.extension.all.mangaplus
 
+import eu.kanade.tachiyomi.lib.i18n.Intl
+import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.protobuf.ProtoNumber
 
 @Serializable
 data class MangaPlusResponse(
-    @ProtoNumber(1) val success: SuccessResult? = null,
-    @ProtoNumber(2) val error: ErrorResult? = null
+    val success: SuccessResult? = null,
+    val error: ErrorResult? = null,
 )
 
 @Serializable
-data class ErrorResult(
-    @ProtoNumber(2) val englishPopup: Popup,
-    @ProtoNumber(3) val spanishPopup: Popup
-)
+data class ErrorResult(val popups: List<Popup> = emptyList()) {
+
+    fun langPopup(lang: Language): Popup? =
+        popups.firstOrNull { it.language == lang }
+}
 
 @Serializable
 data class Popup(
-    @ProtoNumber(1) val subject: String,
-    @ProtoNumber(2) val body: String
+    val subject: String,
+    val body: String,
+    val language: Language? = Language.ENGLISH,
 )
 
 @Serializable
 data class SuccessResult(
-    @ProtoNumber(1) val isFeaturedUpdated: Boolean? = false,
-    @ProtoNumber(6) val titleRankingView: TitleRankingView? = null,
-    @ProtoNumber(8) val titleDetailView: TitleDetailView? = null,
-    @ProtoNumber(10) val mangaViewer: MangaViewer? = null,
-    @ProtoNumber(25) val allTitlesViewV2: AllTitlesViewV2? = null,
-    @ProtoNumber(31) val webHomeViewV3: WebHomeViewV3? = null
+    val isFeaturedUpdated: Boolean? = false,
+    val titleRankingView: TitleRankingView? = null,
+    val titleDetailView: TitleDetailView? = null,
+    val mangaViewer: MangaViewer? = null,
+    val allTitlesViewV2: AllTitlesViewV2? = null,
+    val webHomeViewV3: WebHomeViewV3? = null,
 )
 
 @Serializable
-data class TitleRankingView(@ProtoNumber(1) val titles: List<Title> = emptyList())
+data class TitleRankingView(val titles: List<Title> = emptyList())
 
 @Serializable
 data class AllTitlesViewV2(
-    @ProtoNumber(1) val allTitlesGroup: List<AllTitlesGroup> = emptyList()
+    @SerialName("AllTitlesGroup") val allTitlesGroup: List<AllTitlesGroup> = emptyList(),
 )
 
 @Serializable
 data class AllTitlesGroup(
-    @ProtoNumber(1) val theTitle: String,
-    @ProtoNumber(2) val titles: List<Title> = emptyList()
+    val theTitle: String,
+    val titles: List<Title> = emptyList(),
 )
 
 @Serializable
-data class WebHomeViewV3(@ProtoNumber(2) val groups: List<UpdatedTitleV2Group> = emptyList())
+data class WebHomeViewV3(val groups: List<UpdatedTitleV2Group> = emptyList())
 
 @Serializable
 data class TitleDetailView(
-    @ProtoNumber(1) val title: Title,
-    @ProtoNumber(2) val titleImageUrl: String,
-    @ProtoNumber(3) val overview: String,
-    @ProtoNumber(4) val backgroundImageUrl: String,
-    @ProtoNumber(5) val nextTimeStamp: Int = 0,
-    @ProtoNumber(7) val viewingPeriodDescription: String = "",
-    @ProtoNumber(8) val nonAppearanceInfo: String = "",
-    @ProtoNumber(9) val firstChapterList: List<Chapter> = emptyList(),
-    @ProtoNumber(10) val lastChapterList: List<Chapter> = emptyList(),
-    @ProtoNumber(14) val isSimulReleased: Boolean = false,
-    @ProtoNumber(17) val chaptersDescending: Boolean = true
+    val title: Title,
+    val titleImageUrl: String,
+    val overview: String? = null,
+    val nextTimeStamp: Int = 0,
+    val viewingPeriodDescription: String = "",
+    val nonAppearanceInfo: String = "",
+    val chapterListGroup: List<ChapterListGroup> = emptyList(),
+    val isSimulReleased: Boolean = false,
+    val rating: Rating = Rating.ALL_AGES,
+    val chaptersDescending: Boolean = true,
+    val titleLabels: TitleLabels,
+    val label: Label? = Label(LabelCode.WEEKLY_SHOUNEN_JUMP),
 ) {
+
+    val chapterList: List<Chapter> by lazy {
+        // Doesn't include `midChapterList` by design as their site API returns it
+        // just for visual representation to redirect users to their app. The extension
+        // intends to allow users to read only what they can already read in their site.
+        chapterListGroup.flatMap { it.firstChapterList + it.lastChapterList }
+    }
+
     private val isWebtoon: Boolean
-        get() = firstChapterList.all(Chapter::isVerticalOnly) &&
-            lastChapterList.all(Chapter::isVerticalOnly)
+        get() = chapterList.isNotEmpty() && chapterList.all(Chapter::isVerticalOnly)
 
     private val isOneShot: Boolean
-        get() = chapterCount == 1 && firstChapterList.firstOrNull()
+        get() = chapterList.size == 1 && chapterList.firstOrNull()
             ?.name?.equals("one-shot", true) == true
 
-    private val chapterCount: Int
-        get() = firstChapterList.size + lastChapterList.size
-
     private val isReEdition: Boolean
-        get() = viewingPeriodDescription.contains(MangaPlus.REEDITION_REGEX)
+        get() = viewingPeriodDescription.contains(REEDITION_REGEX)
 
-    val isCompleted: Boolean
-        get() = nonAppearanceInfo.contains(MangaPlus.COMPLETED_REGEX) || isOneShot
+    private val isCompleted: Boolean
+        get() = nonAppearanceInfo.contains(COMPLETED_REGEX) || isOneShot ||
+            titleLabels.releaseSchedule == ReleaseSchedule.COMPLETED ||
+            titleLabels.releaseSchedule == ReleaseSchedule.DISABLED
 
-    val genres: List<String>
-        get() = listOf(
-            if (isSimulReleased && !isReEdition) "Simulrelease" else "",
-            if (isOneShot) "One-shot" else "",
-            if (isReEdition) "Re-edition" else "",
-            if (isWebtoon) "Webtoon" else ""
-        )
+    private val isSimulpub: Boolean
+        get() = isSimulReleased || titleLabels.isSimulpub
+
+    private val isOnHiatus: Boolean
+        get() = nonAppearanceInfo.contains(HIATUS_REGEX)
+
+    private fun createGenres(intl: Intl): List<String> = buildList {
+        if (isSimulpub && !isReEdition && !isOneShot && !isCompleted) {
+            add("Simulrelease")
+        }
+
+        if (isOneShot) {
+            add("One-shot")
+        }
+
+        if (isReEdition) {
+            add("Re-edition")
+        }
+
+        if (isWebtoon) {
+            add("Webtoon")
+        }
+
+        if (label?.magazine != null) {
+            add(intl.format("serialization", label.magazine))
+        }
+
+        if (!isCompleted) {
+            val scheduleLabel = intl["schedule_" + titleLabels.releaseSchedule.toString().lowercase()]
+            add(intl.format("schedule", scheduleLabel))
+        }
+
+        val ratingLabel = intl["rating_" + rating.toString().lowercase()]
+        add(intl.format("rating", ratingLabel))
+    }
+
+    private val viewingInformation: String?
+        get() = viewingPeriodDescription.takeIf { !isCompleted }
+
+    fun toSManga(intl: Intl): SManga = title.toSManga().apply {
+        description = "${overview.orEmpty()}\n\n${viewingInformation.orEmpty()}".trim()
+        status = when {
+            isCompleted -> SManga.COMPLETED
+            isOnHiatus -> SManga.ON_HIATUS
+            else -> SManga.ONGOING
+        }
+        genre = createGenres(intl).joinToString()
+    }
+
+    companion object {
+        private val COMPLETED_REGEX = "completado|complete|completo".toRegex()
+        private val HIATUS_REGEX = "on a hiatus".toRegex(RegexOption.IGNORE_CASE)
+        private val REEDITION_REGEX = "revival|remasterizada".toRegex()
+    }
 }
 
 @Serializable
-data class MangaViewer(@ProtoNumber(1) val pages: List<MangaPlusPage> = emptyList())
+data class TitleLabels(
+    val releaseSchedule: ReleaseSchedule = ReleaseSchedule.DISABLED,
+    val isSimulpub: Boolean = false,
+)
+
+enum class ReleaseSchedule {
+    DISABLED,
+    EVERYDAY,
+    WEEKLY,
+    BIWEEKLY,
+    MONTHLY,
+    BIMONTHLY,
+    TRIMONTHLY,
+    OTHER,
+    COMPLETED,
+}
 
 @Serializable
-data class Title(
-    @ProtoNumber(1) val titleId: Int,
-    @ProtoNumber(2) val name: String,
-    @ProtoNumber(3) val author: String,
-    @ProtoNumber(4) val portraitImageUrl: String,
-    @ProtoNumber(5) val landscapeImageUrl: String,
-    @ProtoNumber(6) val viewCount: Int = 0,
-    @ProtoNumber(7) val language: Language? = Language.ENGLISH
+enum class Rating {
+    @SerialName("ALLAGE")
+    ALL_AGES,
+    TEEN,
+
+    @SerialName("TEENPLUS")
+    TEEN_PLUS,
+    MATURE,
+}
+
+@Serializable
+data class Label(val label: LabelCode? = LabelCode.WEEKLY_SHOUNEN_JUMP) {
+    val magazine: String?
+        get() = when (label) {
+            LabelCode.WEEKLY_SHOUNEN_JUMP -> "Weekly Shounen Jump"
+            LabelCode.JUMP_SQUARE -> "Jump SQ."
+            LabelCode.V_JUMP -> "V Jump"
+            LabelCode.SHOUNEN_JUMP_GIGA -> "Shounen Jump GIGA"
+            LabelCode.WEEKLY_YOUNG_JUMP -> "Weekly Young Jump"
+            LabelCode.TONARI_NO_YOUNG_JUMP -> "Tonari no Young Jump"
+            LabelCode.SHOUNEN_JUMP_PLUS -> "Shounen Jump+"
+            LabelCode.MANGA_PLUS_CREATORS -> "MANGA Plus Creators"
+            LabelCode.SAIKYOU_JUMP -> "Saikyou Jump"
+            else -> null
+        }
+}
+
+@Serializable
+enum class LabelCode {
+    @SerialName("CREATORS")
+    MANGA_PLUS_CREATORS,
+
+    @SerialName("GIGA")
+    SHOUNEN_JUMP_GIGA,
+
+    @SerialName("J_PLUS")
+    SHOUNEN_JUMP_PLUS,
+
+    OTHERS,
+
+    REVIVAL,
+
+    @SerialName("SKJ")
+    SAIKYOU_JUMP,
+
+    @SerialName("SQ")
+    JUMP_SQUARE,
+
+    @SerialName("TYJ")
+    TONARI_NO_YOUNG_JUMP,
+
+    @SerialName("VJ")
+    V_JUMP,
+
+    @SerialName("YJ")
+    WEEKLY_YOUNG_JUMP,
+
+    @SerialName("WSJ")
+    WEEKLY_SHOUNEN_JUMP,
+}
+
+@Serializable
+data class ChapterListGroup(
+    val firstChapterList: List<Chapter> = emptyList(),
+    val lastChapterList: List<Chapter> = emptyList(),
 )
 
 @Serializable
-enum class Language(val id: Int) {
-    @ProtoNumber(0)
-    ENGLISH(0),
+data class MangaViewer(
+    val pages: List<MangaPlusPage> = emptyList(),
+    val titleId: Int? = null,
+    val titleName: String? = null,
+)
 
-    @ProtoNumber(1)
-    SPANISH(1),
+@Serializable
+data class Title(
+    val titleId: Int,
+    val name: String,
+    val author: String? = null,
+    val portraitImageUrl: String,
+    val viewCount: Int = 0,
+    val language: Language? = Language.ENGLISH,
+) {
 
-    @ProtoNumber(2)
-    FRENCH(2),
+    fun toSManga(): SManga = SManga.create().apply {
+        title = name
+        author = this@Title.author?.replace(" / ", ", ")
+        artist = author
+        thumbnail_url = portraitImageUrl
+        url = "#/titles/$titleId"
+    }
+}
 
-    @ProtoNumber(3)
-    INDONESIAN(4),
-
-    @ProtoNumber(4)
-    PORTUGUESE_BR(4),
-
-    @ProtoNumber(5)
-    RUSSIAN(5),
-
-    @ProtoNumber(6)
-    THAI(6)
+enum class Language {
+    ENGLISH,
+    SPANISH,
+    FRENCH,
+    INDONESIAN,
+    PORTUGUESE_BR,
+    RUSSIAN,
+    THAI,
+    VIETNAMESE,
 }
 
 @Serializable
 data class UpdatedTitleV2Group(
-    @ProtoNumber(1) val groupName: String,
-    @ProtoNumber(2) val titleGroups: List<OriginalTitleGroup> = emptyList()
+    val groupName: String,
+    val titleGroups: List<OriginalTitleGroup> = emptyList(),
 )
 
 @Serializable
 data class OriginalTitleGroup(
-    @ProtoNumber(1) val theTitle: String,
-    @ProtoNumber(3) val titles: List<UpdatedTitle> = emptyList()
+    val theTitle: String,
+    val titles: List<UpdatedTitle> = emptyList(),
 )
 
 @Serializable
-data class UpdatedTitle(@ProtoNumber(1) val title: Title)
+data class UpdatedTitle(val title: Title)
 
 @Serializable
 data class Chapter(
-    @ProtoNumber(1) val titleId: Int,
-    @ProtoNumber(2) val chapterId: Int,
-    @ProtoNumber(3) val name: String,
-    @ProtoNumber(4) val subTitle: String? = null,
-    @ProtoNumber(6) val startTimeStamp: Int,
-    @ProtoNumber(7) val endTimeStamp: Int,
-    @ProtoNumber(9) val isVerticalOnly: Boolean = false
-)
+    val titleId: Int,
+    val chapterId: Int,
+    val name: String,
+    val subTitle: String? = null,
+    val startTimeStamp: Int,
+    val endTimeStamp: Int,
+    val isVerticalOnly: Boolean = false,
+) {
+
+    val isExpired: Boolean
+        get() = subTitle == null
+
+    fun toSChapter(): SChapter = SChapter.create().apply {
+        name = "${this@Chapter.name} - $subTitle"
+        date_upload = 1000L * startTimeStamp
+        url = "#/viewer/$chapterId"
+        chapter_number = this@Chapter.name.substringAfter("#").toFloatOrNull() ?: -1f
+    }
+}
 
 @Serializable
-data class MangaPlusPage(@ProtoNumber(1) val page: MangaPage? = null)
+data class MangaPlusPage(val mangaPage: MangaPage? = null)
 
 @Serializable
 data class MangaPage(
-    @ProtoNumber(1) val imageUrl: String,
-    @ProtoNumber(2) val width: Int,
-    @ProtoNumber(3) val height: Int,
-    @ProtoNumber(5) val encryptionKey: String? = null
+    val imageUrl: String,
+    val width: Int,
+    val height: Int,
+    val encryptionKey: String? = null,
 )

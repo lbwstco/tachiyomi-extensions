@@ -21,7 +21,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -36,6 +35,7 @@ import rx.schedulers.Schedulers
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -65,7 +65,7 @@ abstract class HentaiHand(
     // Popular
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val jsonResponse = json.parseToJsonElement(response.body!!.string())
+        val jsonResponse = json.parseToJsonElement(response.body.string())
         val mangaList = jsonResponse.jsonObject["data"]!!.jsonArray.map {
             val obj = it.jsonObject
             SManga.create().apply {
@@ -84,7 +84,7 @@ abstract class HentaiHand(
             .addQueryParameter("sort", "popularity")
             .addQueryParameter("order", "desc")
             .addQueryParameter("duration", "all")
-        hhLangId.forEachIndexed() {index, it ->
+        hhLangId.forEachIndexed { index, it ->
             url.addQueryParameter("languages[${-index - 1}]", it.toString())
         }
         // if (altLangId != null) url.addQueryParameter("languages", altLangId.toString())
@@ -101,7 +101,7 @@ abstract class HentaiHand(
             .addQueryParameter("sort", "uploaded_at")
             .addQueryParameter("order", "desc")
             .addQueryParameter("duration", "all")
-        hhLangId.forEachIndexed() {index, it ->
+        hhLangId.forEachIndexed { index, it ->
             url.addQueryParameter("languages[${-index - 1}]", it.toString())
         }
         return GET(url.toString())
@@ -118,21 +118,23 @@ abstract class HentaiHand(
             .subscribeOn(Schedulers.io())
             .map { response ->
                 // Returns the first matched id, or null if there are no results
-                val idList = json.parseToJsonElement(response.body!!.string()).jsonObject["data"]!!.jsonArray.map {
+                val idList = json.parseToJsonElement(response.body.string()).jsonObject["data"]!!.jsonArray.map {
                     it.jsonObject["id"]!!.jsonPrimitive.content
                 }
-                if (idList.isEmpty()) return@map null
-                else idList.first().toInt()
+                if (idList.isEmpty()) {
+                    return@map null
+                } else {
+                    idList.first().toInt()
+                }
             }.toBlocking().first()
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-
         val url = "$baseUrl/api/comics".toHttpUrlOrNull()!!.newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("q", query)
 
-        hhLangId.forEachIndexed() {index, it ->
+        hhLangId.forEachIndexed { index, it ->
             url.addQueryParameter("languages[${-index - 1}]", it.toString())
         }
 
@@ -150,9 +152,10 @@ abstract class HentaiHand(
                 is LookupFilter -> {
                     filter.state.split(",").map { it.trim() }.filter { it.isNotBlank() }.map {
                         lookupFilterId(it, filter.uri) ?: throw Exception("No ${filter.singularName} \"$it\" was found")
-                    }.forEachIndexed() {index, it ->
-                        if (!(filter.uri == "languages" && hhLangId.contains(it)))
+                    }.forEachIndexed { index, it ->
+                        if (!(filter.uri == "languages" && hhLangId.contains(it))) {
                             url.addQueryParameter(filter.uri + "[$index]", it.toString())
+                        }
                     }
                 }
                 else -> {}
@@ -176,7 +179,7 @@ abstract class HentaiHand(
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val obj = json.parseToJsonElement(response.body!!.string()).jsonObject
+        val obj = json.parseToJsonElement(response.body.string()).jsonObject
         return SManga.create().apply {
             url = slugToUrl(obj)
             title = obj["title"]!!.jsonPrimitive.content
@@ -192,8 +195,6 @@ abstract class HentaiHand(
                 else -> SManga.COMPLETED
             }
 
-
-
             description = listOf(
                 Pair("Alternative Title", obj["alternative_title"]!!.jsonPrimitive.content),
                 Pair("Groups", jsonArrayToString("groups", obj)),
@@ -202,7 +203,7 @@ abstract class HentaiHand(
                 Pair("Category", try { obj["category"]!!.jsonObject["name"]!!.jsonPrimitive.content } catch (_: Exception) { null }),
                 Pair("Language", try { obj["language"]!!.jsonObject["name"]!!.jsonPrimitive.content } catch (_: Exception) { null }),
                 Pair("Parodies", jsonArrayToString("parodies", obj)),
-                Pair("Characters", jsonArrayToString("characters", obj))
+                Pair("Characters", jsonArrayToString("characters", obj)),
             ).filter { !it.second.isNullOrEmpty() }.joinToString("\n\n") { "${it.first}: ${it.second}" }
         }
     }
@@ -223,7 +224,7 @@ abstract class HentaiHand(
     override fun chapterListParse(response: Response): List<SChapter> {
         val slug = response.request.url.toString().substringAfter("/api/comics/").removeSuffix("/chapters")
         return if (chapters) {
-            val array = json.parseToJsonElement(response.body!!.string()).jsonArray
+            val array = json.parseToJsonElement(response.body.string()).jsonArray
             array.map {
                 SChapter.create().apply {
                     url = "$slug/${it.jsonObject["slug"]!!.jsonPrimitive.content}"
@@ -239,7 +240,7 @@ abstract class HentaiHand(
                 }
             }
         } else {
-            val obj = json.parseToJsonElement(response.body!!.string()).jsonObject
+            val obj = json.parseToJsonElement(response.body.string()).jsonObject
             listOf(
                 SChapter.create().apply {
                     url = obj["slug"]!!.jsonPrimitive.content
@@ -253,7 +254,7 @@ abstract class HentaiHand(
                         DATE_FORMAT.parse(obj.jsonObject["uploaded_at"]!!.jsonPrimitive.content)?.time ?: 0
                     }
                     chapter_number = 1f
-                }
+                },
             )
         }
     }
@@ -266,7 +267,7 @@ abstract class HentaiHand(
     }
 
     override fun pageListParse(response: Response): List<Page> =
-        json.parseToJsonElement(response.body!!.string()).jsonObject["images"]!!.jsonArray.map {
+        json.parseToJsonElement(response.body.string()).jsonObject["images"]!!.jsonArray.map {
             val imgObj = it.jsonObject
             val index = imgObj["page"]!!.jsonPrimitive.int
             val imgUrl = imgObj["source_url"]!!.jsonPrimitive.content
@@ -301,16 +302,13 @@ abstract class HentaiHand(
         val body = jsonObject.toString().toRequestBody(MEDIA_TYPE)
         val response = chain.proceed(POST("$baseUrl/api/login", headers, body))
         if (response.code == 401) {
-            throw Exception("Failed to login, check if username and password are correct")
+            throw IOException("Failed to login, check if username and password are correct")
         }
-
-        if (response.body == null)
-            throw Exception("Login response body is empty")
         try {
             // Returns access token as a string, unless unparseable
-            return json.parseToJsonElement(response.body!!.string()).jsonObject["auth"]!!.jsonObject["access-token"]!!.jsonPrimitive.content
+            return json.parseToJsonElement(response.body.string()).jsonObject["auth"]!!.jsonObject["access-token"]!!.jsonPrimitive.content
         } catch (e: IllegalArgumentException) {
-            throw Exception("Cannot parse login response body")
+            throw IOException("Cannot parse login response body")
         }
     }
 
@@ -390,7 +388,7 @@ abstract class HentaiHand(
         ParodiesFilter(),
         LanguagesFilter(),
         AttributesGroupFilter(getAttributePairs()),
-        StatusGroupFilter(getStatusPairs())
+        StatusGroupFilter(getStatusPairs()),
     )
 
     private fun getSortPairs() = listOf(
@@ -398,12 +396,12 @@ abstract class HentaiHand(
         Pair("Title", "title"),
         Pair("Pages", "pages"),
         Pair("Favorites", "favorites"),
-        Pair("Popularity", "popularity")
+        Pair("Popularity", "popularity"),
     )
 
     private fun getOrderPairs() = listOf(
         Pair("Descending", "desc"),
-        Pair("Ascending", "asc")
+        Pair("Ascending", "asc"),
     )
 
     private fun getDurationPairs() = listOf(
@@ -411,20 +409,20 @@ abstract class HentaiHand(
         Pair("This Week", "week"),
         Pair("This Month", "month"),
         Pair("This Year", "year"),
-        Pair("All Time", "all")
+        Pair("All Time", "all"),
     )
 
     private fun getAttributePairs() = listOf(
         Pair("Translated", "translated"),
         Pair("Speechless", "speechless"),
-        Pair("Rewritten", "rewritten")
+        Pair("Rewritten", "rewritten"),
     )
 
     private fun getStatusPairs() = listOf(
         Pair("Ongoing", "ongoing"),
         Pair("Complete", "complete"),
         Pair("On Hold", "onhold"),
-        Pair("Canceled", "canceled")
+        Pair("Canceled", "canceled"),
     )
 
     companion object {

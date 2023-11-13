@@ -1,111 +1,71 @@
 package eu.kanade.tachiyomi.extension.zh.manhuadb
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.model.FilterList
-import eu.kanade.tachiyomi.source.model.Page
-import eu.kanade.tachiyomi.source.model.SChapter
-import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
-import okhttp3.Headers
-import okhttp3.Request
+import android.app.Application
+import android.content.SharedPreferences
+import android.util.Base64
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
+import eu.kanade.tachiyomi.source.ConfigurableSource
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import okhttp3.Response
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.util.regex.Pattern
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+import uy.kohesive.injekt.injectLazy
 
-class ManhuaDB : ParsedHttpSource() {
+class ManhuaDB : MDB("漫画DB", "https://www.manhuadb.com"), ConfigurableSource {
 
-    override val baseUrl = "https://www.manhuadb.com"
+    override val supportsLatest = false
 
-    override val lang = "zh"
+    override fun listUrl(params: String) = "$baseUrl/manhua/list-$params.html"
+    override fun extractParams(listUrl: String) = listUrl.substringAfter("/list-").removeSuffix(".html")
+    override fun searchUrl(page: Int, query: String) = "$baseUrl/search?q=$query&p=$page"
 
-    override val name = "漫画DB"
+    override fun popularMangaNextPageSelector() = "nav > div.form-inline > :nth-last-child(2):not(.disabled)"
 
-    override val supportsLatest = true
+    override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException("Not used.")
+    override fun latestUpdatesNextPageSelector() = throw UnsupportedOperationException("Not used.")
+    override fun latestUpdatesSelector() = throw UnsupportedOperationException("Not used.")
+    override fun latestUpdatesFromElement(element: Element) = throw UnsupportedOperationException("Not used.")
 
-    override fun headersBuilder(): Headers.Builder =
-        super.headersBuilder().add("Referer", "https://www.manhuadb.com")
+    override val authorSelector = "a.comic-creator"
+    override fun transformDescription(description: String) = description.substringBeforeLast("欢迎在漫画DB观看")
 
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        name = element.attr("title")
-        url = element.attr("href")
-    }
+    override fun chapterListParse(response: Response) = super.chapterListParse(response).asReversed()
 
-    /**
-     * Rewrite the method to ensure consistency with previous format orders
-     */
-    override fun chapterListParse(response: Response): List<SChapter> {
-        return super.chapterListParse(response).reversed()
-    }
+    private val json: Json by injectLazy()
 
-    override fun chapterListSelector() = "#comic-book-list > div > ol > li > a"
-
-    override fun imageUrlParse(document: Document): String {
-        return document.select("div.text-center > img.img-fluid").attr("abs:src")
-    }
-
-    override fun latestUpdatesFromElement(element: Element): SManga = popularMangaFromElement(element)
-
-    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
-
-    override fun latestUpdatesRequest(page: Int): Request = popularMangaRequest(page)
-
-    override fun latestUpdatesSelector() = popularMangaSelector()
-
-    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        title = document.select("h1.comic-title").text()
-        thumbnail_url = document.select("td.comic-cover > img").attr("abs:src")
-        author = document.select("a.comic-creator").text()
-        description = document.select("p.comic_story").text()
-        status = when (document.select("td > a.comic-pub-state").text()) {
-            "连载中" -> SManga.ONGOING
-            "已完结" -> SManga.COMPLETED
-            else -> SManga.UNKNOWN
+    // https://www.manhuadb.com/assets/js/vg-read.js
+    override fun parseImages(imgData: String, readerConfig: Element): List<String> {
+        val list: List<Image> = Base64.decode(imgData, Base64.DEFAULT)
+            .let { json.decodeFromString(String(it)) }
+        val host = readerConfig.attr("data-host")
+        val dir = readerConfig.attr("data-img_pre")
+        val useWebp = preferences.getBoolean(WEBP_PREF, true)
+        return list.map {
+            host + dir + if (useWebp && it.img_webp != null) it.img_webp else it.img
         }
-        genre = document.select("ul.tags > li a").joinToString { it.text() }
     }
 
-    override fun pageListParse(document: Document): List<Page> {
-        val pages = mutableListOf<Page>()
-        val pageStr = document.select("ol.breadcrumb > li:eq(2)").text()
-        val pageNumMatcher = Pattern.compile("共\\s*(\\d+)").matcher(pageStr)
-        if (pageNumMatcher.find()) {
-            val page = Integer.parseInt(pageNumMatcher.group(1)!!)
-            var path = document.select("ol.breadcrumb > li:eq(2) > a").attr("href")
-            path = path.substring(1, path.length - 5)
-            for (i in 0 until page)
-                pages.add(Page(i, "$baseUrl/${path}_p${i + 1}.html"))
-        }
-        return pages
+    @Serializable
+    data class Image(val img: String, val img_webp: String? = null)
+
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }
 
-    override fun popularMangaFromElement(element: Element): SManga {
-        val manga = SManga.create()
-        element.select("h2").first().let {
-            manga.setUrlWithoutDomain(it.select("a").first().attr("href"))
-            manga.title = it.text()
-        }
-        manga.thumbnail_url = element.select("a > img").attr("abs:src")
-        return manga
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = WEBP_PREF
+            title = "优先使用 WebP 图片格式"
+            summary = "默认开启，可以节省网站流量"
+            setDefaultValue(true)
+        }.let { screen.addPreference(it) }
     }
 
-    override fun popularMangaNextPageSelector() = "a:contains(下页):not(.disabled)"
-
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manhua/list-page-$page.html")
-
-    override fun popularMangaSelector() = "div.comic-book-unit"
-
-    override fun searchMangaFromElement(element: Element): SManga = SManga.create().apply {
-        title = element.attr("title")
-        setUrlWithoutDomain(element.attr("href"))
-        thumbnail_url = element.select("img").attr("abs:src")
+    companion object {
+        private const val WEBP_PREF = "WEBP"
     }
-
-    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        return GET("$baseUrl/search?q=$query&p=$page", headers)
-    }
-
-    override fun searchMangaSelector() = "a.d-block"
 }

@@ -1,10 +1,9 @@
 package eu.kanade.tachiyomi.extension.pt.yaoitoshokan
 
-import eu.kanade.tachiyomi.lib.ratelimit.RateLimitInterceptor
 import eu.kanade.tachiyomi.multisrc.madara.Madara
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.model.Page
-import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.nodes.Document
@@ -16,14 +15,11 @@ class YaoiToshokan : Madara(
     "Yaoi Toshokan",
     "https://www.yaoitoshokan.net",
     "pt-BR",
-    SimpleDateFormat("dd MMM yyyy", Locale("pt", "BR"))
+    SimpleDateFormat("dd MMM yyyy", Locale("pt", "BR")),
 ) {
 
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .removeAll("User-Agent")
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(RateLimitInterceptor(1, 2, TimeUnit.SECONDS))
+    override val client: OkHttpClient = super.client.newBuilder()
+        .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
 
     // Page has custom link to scan website.

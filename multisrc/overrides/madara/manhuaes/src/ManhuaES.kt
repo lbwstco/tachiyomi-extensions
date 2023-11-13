@@ -8,10 +8,8 @@ import okhttp3.Response
 
 class ManhuaES : Madara("Manhua ES", "https://manhuaes.com", "en") {
 
-    // The website is incorrectly flagging a lot of their
-    // manga content as video and text instead. To bypass this, we
-    // use the old selector that includes all.
-    override fun popularMangaSelector() = "div.page-item-detail:not(:has(a[href*='bilibilicomics.com']))"
+    // The website does not flag the content.
+    override val filterNonMangaItems = false
 
     override fun chapterListParse(response: Response): List<SChapter> {
         var chapterList = super.chapterListParse(response)
@@ -28,7 +26,7 @@ class ManhuaES : Madara("Manhua ES", "https://manhuaes.com", "en") {
 
     private fun isReleasedChapter(chapter: SChapter): Boolean {
         val document = client.newCall(
-            GET(chapter.url, headersBuilder().build())
+            GET(chapter.url, headersBuilder().build()),
         ).execute().asJsoup()
 
         return document.select(pageListParseSelector).isNotEmpty()

@@ -5,11 +5,11 @@ import java.util.Locale
 
 class LeCercleDuScan : FoolSlide("Le Cercle du Scan", "https://lel.lecercleduscan.com", "fr") {
     override fun parseChapterDate(date: String) = super.parseChapterDate(
-        when (val lcDate = date.toLowerCase(Locale.FRENCH)) {
+        when (val lcDate = date.lowercase(Locale.FRENCH)) {
             "hier" -> "yesterday"
             "aujourd'hui" -> "today"
             "demain" -> "tomorrow"
             else -> lcDate
-        }
+        },
     )
 }
